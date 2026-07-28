@@ -346,9 +346,9 @@ uint8_t Font_Flash_ASC_Adapter(uint32_t code, GlyphInfo *out_glyph,
   if (!g_flash_ok)
     return _fallback_5x8(code, out_glyph, render_now);
 
-  /* --- 2. 无活跃字库 → 失败 --- */
+  /* --- 2. 无活跃字库 → 回退内部 5x8 --- */
   if (g_asc_active < 0)
-    return 0;
+    return _fallback_5x8(code, out_glyph, render_now);
 
   const ASCSlot *s = &g_asc_slots[g_asc_active];
 
@@ -406,9 +406,9 @@ uint8_t Font_Flash_GBK_Adapter(uint32_t gbk_code, GlyphInfo *out_glyph,
   if (!g_flash_ok)
     return _fallback_5x8('?', out_glyph, render_now);
 
-  /* --- 2. 无活跃字库 → 失败 --- */
+  /* --- 2. 无活跃字库 → 回退内部 5x8 '?' --- */
   if (g_gbk_active < 0)
-    return 0;
+    return _fallback_5x8('?', out_glyph, render_now);
 
   const GBKSlot *s = &g_gbk_slots[g_gbk_active];
 

@@ -208,7 +208,7 @@ void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
 }
 
 // ============================================================================
-// 核心渲染函数：单色块搬运
+// 核心渲染函数：单色块搬运（已修复 Canvas 左侧未对齐漏刷 Bug）
 // ============================================================================
 
 /**
@@ -220,21 +220,28 @@ void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
  * @param off_x      额外 X 偏移
  * @param off_y      额外 Y 偏移
  *
- * 单色简化：
- *   - Canvas 格式为水平扫描 MSB-first (1 位/像素, 8 像素/字节)
- *   - frame_buffer 格式相同：每像素 1 位，1=亮，0=灭
- *   - Canvas 的 bit=1 对应 frame_buffer 对应位写 1
- *   - 无颜色通道处理，无区号
+ * 单色与硬件逻辑说明：
+ *   - Canvas 格式：MSB-first (1 位/像素, 8 像素/字节)，bit 1 = 有有效像素
+ *   - 硬件驱动逻辑：低电平点亮 (0 = 亮, 1 = 灭)
+ *   - 搬运逻辑：Canvas bit=1 对应 frame_buffer 写 0；bit=0 对应写 1 (即按位取反
+ * ~)
+ *   - 超出 Canvas 范围的像素统一写 1 (0xFF，表示全灭)
  */
 void Window_BlitToScreen(LED_Window *win, uint16_t h_px, uint8_t color_high,
                          uint8_t color_base, int16_t off_x, int16_t off_y) {
-  (void)h_px; // 歌词模式暂未实现，保留参数接口
+  (void)h_px;
   (void)color_high;
   (void)color_base;
+
   if (!win->is_active || win->canvas.handle == -1)
     return;
 
   CanvasHandle *cv = &win->canvas;
+
+  /* 零尺寸保护 */
+  if (cv->width == 0 || cv->height == 0)
+    return;
+
   uint16_t cv_bw = (cv->width + 7) / 8;               // Canvas 每行字节数
   uint8_t *shape = cv->r_ptr ? cv->r_ptr : cv->g_ptr; // 单色画布数据
   if (!shape)
@@ -248,8 +255,6 @@ void Window_BlitToScreen(LED_Window *win, uint16_t h_px, uint8_t color_high,
   uint16_t h = win->h;
 
   int16_t canvas_origin_x = base_x + win->x_offset;
-  /* canvas_origin_y 供将来扩展，当前未使用 */
-  // int16_t canvas_origin_y = base_y + win->y_offset;
 
   for (uint16_t vy = 0; vy < h; vy++) {
     int16_t sy = base_y + (int16_t)vy;
@@ -257,9 +262,16 @@ void Window_BlitToScreen(LED_Window *win, uint16_t h_px, uint8_t color_high,
       continue;
 
     uint8_t sr = (uint8_t)(sy & (LED_SCAN_ROWS - 1));
-    uint8_t *fb_row = frame_buffer[wb][sr]; // [BYTES_PER_ROW]
+    uint8_t *fb_row = frame_buffer[wb][sr];
 
-    // 水平范围钳位
+    // 1. 钳位屏幕 Y 轴对应的 Canvas 行
+    int16_t cy = (int16_t)vy - win->y_offset;
+    if (cy < 0 || cy >= (int16_t)cv->height)
+      continue;
+
+    uint8_t *c_line = shape + (uint16_t)cy * cv_bw;
+
+    // 2. 计算屏幕水平绘制范围
     int16_t start_x = base_x;
     int16_t end_x = base_x + (int16_t)w;
     if (start_x < 0)
@@ -269,49 +281,52 @@ void Window_BlitToScreen(LED_Window *win, uint16_t h_px, uint8_t color_high,
     if (start_x >= end_x)
       continue;
 
-    // 画布纵向坐标
-    int16_t cy = (int16_t)vy - win->y_offset;
-    if (cy < 0 || cy >= (int16_t)cv->height)
-      continue;
+    // 3. 起始坐标向下对齐到屏幕字节边界 (8的倍数)
+    int16_t align_start_x = start_x & ~7;
 
-    uint8_t *c_line = shape + (uint16_t)cy * cv_bw;
+    for (int16_t sx = align_start_x; sx < end_x; sx += 8) {
+      int16_t cx =
+          sx - canvas_origin_x; // 当前屏幕字节首像素对应的 Canvas X 坐标
 
-    /* ── 按屏幕字节（8 像素）批量搬运 ────────────────────
-     * Canvas 和 frame_buffer 均为 packed bits MSB-first。
-     * 每次处理一个屏幕字节（8 像素），从 Canvas 中读 2 字节
-     * 拼成 16 位，右移位对齐到屏幕字节边界，OR 写入。
-     * 一个屏幕字节最多跨越 2 个 Canvas 字节，移位即可解。 */
-    for (int16_t sx = start_x; sx < end_x; sx += 8) {
-      int16_t cx = sx - canvas_origin_x; // 屏幕字节首像素 → Canvas 坐标
-
-      /* 整字节在 Canvas 左侧，跳过 */
-      if (cx + 7 < 0)
+      /* Case A: 完全在 Canvas 左侧外 或 完全在 Canvas 右侧外 */
+      if (cx + 7 < 0 || cx >= (int16_t)cv->width) {
+        fb_row[(uint16_t)(sx >> 3)] = 0xFF; // 全灭
         continue;
-      /* 已完全超出 Canvas 右侧，本行结束 */
-      if (cx >= (int16_t)cv->width)
-        break;
-
-      uint16_t c_idx = (uint16_t)(cx >> 3); // Canvas 字节索引
-      uint8_t c_off = (uint8_t)(cx & 7);    // 位偏移 0~7
-
-      /* 跨 2 字节读取，高位补 0 */
-      uint16_t pair = (uint16_t)c_line[c_idx] << 8;
-      if (c_idx + 1 < cv_bw)
-        pair |= c_line[c_idx + 1];
-
-      /* 右移使画布像素 0 对齐到屏幕 MSB 位置 */
-      uint8_t bits = (uint8_t)(pair >> (8 - c_off));
-
-      /* 掩码裁切：去除 Canvas 边界外的不存在像素 */
-      uint8_t mask = 0xFF;
-      if (cx < 0)
-        mask &= (uint8_t)(0xFF << (-cx)); // 裁掉左端
-      if (cx + 7 >= (int16_t)cv->width) {
-        int16_t tail = cx + 7 - (int16_t)(cv->width - 1);
-        mask &= (uint8_t)(0xFF >> tail); // 裁掉右端
       }
 
-      fb_row[(uint16_t)(sx >> 3)] |= (bits & mask);
+      uint8_t bits = 0;
+
+      /* ── 精确对齐算法：区分 cx < 0 (Canvas首字节部分露头) 与 cx >= 0 ──────
+       */
+      if (cx < 0) {
+        /*
+         * 【关键修复】Canvas 第 0 字节在屏幕字节内部“半路显现”
+         * 示例: cx = -3，代表屏幕字节的前 3 个像素在 Canvas 左侧外(填0)。
+         * 屏幕第 3 像素对应 Canvas 像素 0 (即 c_line[0] 的 bit7)。
+         *
+         * 运算逻辑：读取 c_line[0]，向右移动 (-cx) 位即可！
+         * 例如 cx = -3: c_line[0] >> 3，高 3 位自动补 0，低 5 位对齐到屏幕位。
+         */
+        uint8_t b0 = (cv_bw > 0) ? c_line[0] : 0x00;
+        bits = b0 >> (-cx);
+      } else {
+        /*
+         * Canvas 内部或跨字节读取
+         * cx >= 0 时，位移量 c_off = cx % 8 正确有效。
+         */
+        uint16_t c_idx = (uint16_t)(cx >> 3);
+        uint8_t b0 = (c_idx < cv_bw) ? c_line[c_idx] : 0x00;
+        uint8_t b1 = (c_idx + 1 < cv_bw) ? c_line[c_idx + 1] : 0x00;
+
+        uint16_t pair = ((uint16_t)b0 << 8) | b1;
+        uint8_t c_off = (uint8_t)(cx & 7); // cx >= 0 时取模完全安全
+
+        // 右移取出 8 像素窗口，MSB 对齐
+        bits = (uint8_t)(pair >> (8 - c_off));
+      }
+
+      /* ── 硬件逻辑：0=亮, 1=灭 ────────────────────────── */
+      fb_row[(uint16_t)(sx >> 3)] = ~bits;
     }
   }
 }

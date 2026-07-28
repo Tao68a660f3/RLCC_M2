@@ -15,7 +15,7 @@ static volatile uint8_t read_idx = 1;
 static uint8_t s_current_row = 0;
 static uint8_t s_led_enabled = 1;  // 1=亮, 0=灭
 static uint8_t s_brightness = 100; // 0~100
-static volatile uint8_t s_need_commit = 0;
+volatile uint8_t need_commit = 0;  // 非 static，供 window_manager 外部访问
 static volatile uint8_t s_flush_counter = 0;
 static uint8_t s_horizontal_mirror = 0;
 static uint8_t s_mirror_row[BYTES_PER_ROW]; // 镜像临时行缓冲
@@ -94,7 +94,7 @@ static inline void LED_SwapBuffers(void) {
 /* ════════════════════════════════════════════════════
  * 提交：仅标记请求，等 FLUSH_DIV 帧后才真正 swap
  * ════════════════════════════════════════════════════ */
-void LED_Commit(void) { s_need_commit = 1; }
+void LED_Commit(void) { need_commit = 1; }
 
 /* ════════════════════════════════════════════════════
  * TIM1 更新中断：行刷新入口
@@ -122,11 +122,11 @@ void LED_TIM1_IRQHandler(void) {
   /* ── 4. FLUSH 计数：完整扫完一帧（row 绕回 0）才判断 ── */
   if (s_current_row == LED_SCAN_ROWS - 1) {
     s_flush_counter++;
-    if (s_need_commit) {
+    if (need_commit) {
       if (s_flush_counter >= FLUSH_DIV) {
         LED_SwapBuffers();
         s_flush_counter = 0;
-        s_need_commit = 0;
+        need_commit = 0;
       }
     }
   }
@@ -209,6 +209,9 @@ void LED_Init(void) {
   TIM2->CR1 |= TIM_CR1_OPM;   // 单脉冲
   TIM2->DIER |= TIM_DIER_UIE; // 使能更新中断
   // TIM2 NVIC 已在 CubeMX 中使能
+
+  /* ── 默认开启水平镜像（硬件布线镜像补偿） ── */
+  s_horizontal_mirror = 1;
 
   /* ── 启动 TIM1 行刷新 ── */
   HAL_TIM_Base_Start_IT(&htim1);

@@ -54,14 +54,29 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # 1. 用户源文件（显式列出，避免编译旧文件）
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    # Board 层驱动
     Drivers/Board/lcd_driver.c
-    App/lcd_test.c
+    Drivers/Board/bsp_rtc.c
+    Drivers/Board/w25q64.c
+
+    # # Display 层驱动
+    # Drivers/Display/led_driver.c
+    # Drivers/Display/led_display.c
+    # Drivers/Display/window_manager.c
+    # Drivers/Display/canvas_renderer.c
+    # Drivers/Display/mem_pool.c
+    # Drivers/Display/font_config.c
+    # Drivers/Display/inner_font.c
+    # Drivers/Display/flash_font.c
+
+    # App 层
     App/app.c
 )
 
 # 2. 包含路径
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Drivers/Board/
+    # Drivers/Display/
     App/
 )
 

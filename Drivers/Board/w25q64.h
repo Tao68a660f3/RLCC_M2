@@ -2,7 +2,7 @@
 #define __W25Q64_H
 
 #include "main.h"
-#include "stm32f4xx_hal.h"
+#include "stm32f1xx_hal.h"
 #include <stdint.h>
 
 /* ------------------ 硬件引脚控置 ------------------ */

@@ -1,7 +1,7 @@
 #ifndef __BSP_RTC_H
 #define __BSP_RTC_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f1xx_hal.h"
 #include <stdint.h>
 
 /* 时间结构体定义 */

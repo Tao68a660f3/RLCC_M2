@@ -10,8 +10,8 @@
  * 已经运行中（保留了先前时间）
  */
 uint8_t RTC_App_Init(RTC_HandleTypeDef *hrtc) {
-  // 检查备份寄存器 DR0
-  if (HAL_RTCEx_BKUPRead(hrtc, RTC_BKP_DR0) != RTC_BKP_SIGNATURE) {
+  // 检查备份寄存器 DR1（F1 的备份寄存器编号从 1 开始，无 DR0）
+  if (HAL_RTCEx_BKUPRead(hrtc, RTC_BKP_DR1) != RTC_BKP_SIGNATURE) {
     // 说明是第一次上电（或备用电池没电了），设置一个默认初始时间
     RTC_DateTimeTypeDef default_dt = {.year = 2026,
                                       .month = 7,
@@ -24,7 +24,7 @@ uint8_t RTC_App_Init(RTC_HandleTypeDef *hrtc) {
     RTC_SetDateTime(hrtc, &default_dt);
 
     // 写入暗号，防止下次复位被重置
-    HAL_RTCEx_BKUPWrite(hrtc, RTC_BKP_DR0, RTC_BKP_SIGNATURE);
+    HAL_RTCEx_BKUPWrite(hrtc, RTC_BKP_DR1, RTC_BKP_SIGNATURE);
     return 1;
   }
 
@@ -42,8 +42,7 @@ uint8_t RTC_SetDateTime(RTC_HandleTypeDef *hrtc, RTC_DateTimeTypeDef *dt) {
   sTime.Hours = dt->hours;
   sTime.Minutes = dt->minutes;
   sTime.Seconds = dt->seconds;
-  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
-  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  // F1 的 RTC_TimeTypeDef 没有 DayLightSaving / StoreOperation 成员，已删除
 
   if (HAL_RTC_SetTime(hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK) {
     return 0;

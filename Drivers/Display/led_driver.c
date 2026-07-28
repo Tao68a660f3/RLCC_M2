@@ -1,286 +1,243 @@
 #include "led_driver.h"
-#include "main.h"
-#include "system_utils.h"
 #include <string.h>
 
-#define FLUSH_DIV 4
+/* ── 外部句柄 ──────────────────────────────────────── */
+extern TIM_HandleTypeDef htim1;
+extern SPI_HandleTypeDef hspi1;
 
-volatile uint8_t need_commit = 1;
-volatile uint8_t flush_counter = 0;
+/* ── 显存：双缓冲 ──────────────────────────────────── */
+uint8_t frame_buffer[LED_BUF_COUNT][LED_SCAN_ROWS][BYTES_PER_ROW]
+    __attribute__((aligned(4)));
+volatile uint8_t write_idx = 0;
+static volatile uint8_t read_idx = 1;
 
-/** 屏幕使能标志：1=亮屏，0=灭屏（中断中据此控制 OE） */
-static uint8_t s_led_enabled = 1;
+/* ── 运行时状态 ────────────────────────────────────── */
+static uint8_t s_current_row = 0;
+static uint8_t s_led_enabled = 1;  // 1=亮, 0=灭
+static uint8_t s_brightness = 100; // 0~100
+static volatile uint8_t s_need_commit = 0;
+static volatile uint8_t s_flush_counter = 0;
+static uint8_t s_horizontal_mirror = 0;
+static uint8_t s_mirror_row[BYTES_PER_ROW]; // 镜像临时行缓冲
 
-/** 亮度 0~100（0=灭, 100=最亮） */
-static uint8_t s_brightness = 100;
+/* ════════════════════════════════════════════════════
+ * 字节内位反转（3 次分治法，约 6~8 指令）
+ * ════════════════════════════════════════════════════ */
+static inline uint8_t reverse_byte(uint8_t b) {
+  b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+  b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+  b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+  return b;
+}
 
-/* ── DWT 自适应行周期测量 ────────────────────────── */
-static uint32_t s_prev_cyccnt = 0;
-static uint32_t s_row_cycle_cycles = 0;
-static uint8_t s_meas_ready = 0;
-
-// 1. 显存定义：双缓冲
-uint8_t frame_buffer[2][SCAN_ROWS][DRIVER_WIDTH] __attribute__((aligned(4)));
-static volatile uint8_t read_idx = 0;
-volatile uint8_t write_idx = 1;
-
-// 2. 底层指针与句柄
-static TIM_HandleTypeDef *p_htim;
-static uint8_t *p_active_row;
-static uint8_t row_idx = 0;
-extern DMA_HandleTypeDef hdma_tim1_ch2;
-
-// 换行逻辑：控制 A, B, C, D 引脚
-void LED_UpdateRow(uint8_t row) {
-  if (row == 15) {
-    flush_counter++;
-    if (need_commit) {
-      if (flush_counter >= FLUSH_DIV) {
-        LED_Commit();
-        flush_counter = 0;
-        need_commit = 0;
-      }
-    }
-  }
+/* ════════════════════════════════════════════════════
+ * 行地址选择：A=PB0, B=PB1, C=PB10, D=PB11
+ * ════════════════════════════════════════════════════ */
+static void LED_UpdateRow(uint8_t row) {
   uint32_t set_mask = 0;
   uint32_t reset_mask = 0;
 
-  // Row Bit 0 -> PA8
   if (row & 0x01)
     set_mask |= LED_LA_Pin;
   else
     reset_mask |= LED_LA_Pin;
-  // Row Bit 1 -> PA11
   if (row & 0x02)
     set_mask |= LED_LB_Pin;
   else
     reset_mask |= LED_LB_Pin;
-  // Row Bit 2 -> PA04 -> PA12
   if (row & 0x04)
     set_mask |= LED_LC_Pin;
   else
     reset_mask |= LED_LC_Pin;
-  // Row Bit 3 -> PA08 -> PA15
   if (row & 0x08)
     set_mask |= LED_LD_Pin;
   else
     reset_mask |= LED_LD_Pin;
 
-  // 一次性写入 BSRR 保证时序对齐
   LED_LA_GPIO_Port->BSRR = (reset_mask << 16) | set_mask;
 }
 
-// 5. 绘图接口：写到 write_idx 缓冲区
-void LED_SetPixel(int16_t x, int16_t y, LED_Color color) {
-  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT)
+/* ════════════════════════════════════════════════════
+ * 绘图接口：写入 write_idx 缓冲区
+ * ════════════════════════════════════════════════════ */
+void LED_SetPixel(int16_t x, int16_t y, uint8_t on) {
+  if (x < 0 || x >= LED_WIDTH || y < 0 || y >= LED_HEIGHT)
     return;
 
-  uint8_t row_idx = y % 16;
-  uint8_t r = (color & 0x01);
-  uint8_t g = (color & 0x02) >> 1;
+  uint8_t byte_idx = (uint8_t)(x / 8);
+  uint8_t bit_pos = (uint8_t)(x % 8);
+  uint8_t bit_mask = (uint8_t)(0x80 >> bit_pos);
 
-  // 按区选择操作的位: Q0=bit0~1, Q1=bit2~3, Q2=bit4~5, Q3=bit6~7
-  uint8_t q = (uint8_t)(y / 16);
-  uint8_t r_bit = (uint8_t)(1 << (q * 2)); // R bit mask
-  uint8_t g_bit = (uint8_t)(2 << (q * 2)); // G bit mask
-
-  if (r)
-    frame_buffer[write_idx][row_idx][x] &= ~r_bit;
+  if (on)
+    frame_buffer[write_idx][y][byte_idx] &= ~bit_mask; // 0 = 亮
   else
-    frame_buffer[write_idx][row_idx][x] |= r_bit;
-  if (g)
-    frame_buffer[write_idx][row_idx][x] &= ~g_bit;
-  else
-    frame_buffer[write_idx][row_idx][x] |= g_bit;
+    frame_buffer[write_idx][y][byte_idx] |= bit_mask; // 1 = 灭
 }
 
-void LED_Clear(void) { memset(frame_buffer, 0xff, sizeof(frame_buffer)); }
+void LED_Clear(void) {
+  memset(frame_buffer, 0xFF, sizeof(frame_buffer)); // 全 1 = 全灭
+}
 
-/** 清除指定物理区域在两个双缓冲中的像素 */
-void LED_ClearAreaAllBuffers(int16_t x, int16_t y, uint16_t w, uint16_t h) {
-  if (x < 0) {
-    w += x;
-    x = 0;
-  }
-  if (y < 0) {
-    h += y;
-    y = 0;
-  }
-  if (x + w > WIDTH)
-    w = WIDTH - x;
-  if (y + h > HEIGHT)
-    h = HEIGHT - y;
-  if ((int16_t)w <= 0 || (int16_t)h <= 0)
-    return;
+void LED_Fill(void) {
+  memset(frame_buffer, 0x00, sizeof(frame_buffer)); // 全 0 = 全亮
+}
 
-  for (uint8_t buf = 0; buf < 2; buf++) {
-    for (uint16_t row = y; row < y + h; row++) {
-      uint8_t r = row % 16;
-      uint8_t q = row / 16;
-      uint8_t clr = (uint8_t)((1 << (q * 2)) | (2 << (q * 2)));
-      uint8_t *p = &frame_buffer[buf][r][(uint16_t)x];
+/* ════════════════════════════════════════════════════
+ * 内部：实际 swap 缓冲区（仅在 ISR 中调用）
+ * ════════════════════════════════════════════════════ */
+static inline void LED_SwapBuffers(void) {
+  uint8_t old_read = read_idx;
+  read_idx = write_idx;
+  write_idx = old_read;
+}
 
-      uint16_t col = 0;
-      // 4 字节对齐头
-      while (col < w && ((uint32_t)&p[col] & 3)) {
-        p[col++] |= clr;
-      }
-      // 32 位批量写
-      uint32_t clr32 = (uint32_t)clr * 0x01010101;
-      for (; col + 3 < w; col += 4) {
-        *(uint32_t *)&p[col] |= clr32;
-      }
-      // 尾部零头
-      for (; col < w; col++) {
-        p[col] |= clr;
+/* ════════════════════════════════════════════════════
+ * 提交：仅标记请求，等 FLUSH_DIV 帧后才真正 swap
+ * ════════════════════════════════════════════════════ */
+void LED_Commit(void) { s_need_commit = 1; }
+
+/* ════════════════════════════════════════════════════
+ * TIM1 更新中断：行刷新入口
+ *   1. OE=OFF
+ *   2. 更新行地址
+ *   3. LAT 脉冲（锁存上一轮移入的数据）
+ *   4. SPI DMA 发送下一行数据
+ * ════════════════════════════════════════════════════ */
+void LED_TIM1_IRQHandler(void) {
+  /* ── 清除中断标志 ── */
+  __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+
+  /* ── 1. OE=OFF（消隐） ── */
+  LED_EN_GPIO_Port->BSRR = LED_EN_Pin;
+
+  /* ── 2. 更新行地址 ── */
+  LED_UpdateRow(s_current_row);
+
+  /* ── 3. LAT 脉冲：锁存上一轮移入的数据 ── */
+  LED_LAT_GPIO_Port->BSRR = LED_LAT_Pin;
+  __NOP();
+  __NOP();
+  LED_LAT_GPIO_Port->BSRR = (uint32_t)LED_LAT_Pin << 16;
+
+  /* ── 4. FLUSH 计数：完整扫完一帧（row 绕回 0）才判断 ── */
+  if (s_current_row == LED_SCAN_ROWS - 1) {
+    s_flush_counter++;
+    if (s_need_commit) {
+      if (s_flush_counter >= FLUSH_DIV) {
+        LED_SwapBuffers();
+        s_flush_counter = 0;
+        s_need_commit = 0;
       }
     }
   }
-}
 
-// 6. 提交接口：交换缓冲区并清空下一帧
-void LED_Commit(void) {
-  uint8_t old_read_idx = read_idx;
-  read_idx = write_idx;
-  write_idx = old_read_idx;
-}
+  /* ── 5. SPI DMA 发送下一行数据 ── */
+  uint8_t next_row = (s_current_row + 1) & (LED_SCAN_ROWS - 1);
+  s_current_row = next_row;
 
-void LED_IRQHandler_Logic(void) {
-  /* ── DWT 实测行周期（自适应，无需硬编码） ── */
-  uint32_t now = DWT->CYCCNT;
-  if (s_meas_ready) {
-    s_row_cycle_cycles = now - s_prev_cyccnt;
+  if (s_horizontal_mirror) {
+    /* 镜像模式：字节翻转 + 位反转 */
+    for (int i = 0; i < BYTES_PER_ROW; i++) {
+      s_mirror_row[i] =
+          reverse_byte(frame_buffer[read_idx][next_row][BYTES_PER_ROW - 1 - i]);
+    }
+    HAL_SPI_Transmit_DMA(&hspi1, s_mirror_row, BYTES_PER_ROW);
   } else {
-    s_meas_ready = 1; // 第一行不调光，之后才启用
+    HAL_SPI_Transmit_DMA(&hspi1, &frame_buffer[read_idx][next_row][0],
+                         BYTES_PER_ROW);
   }
-  s_prev_cyccnt = now;
+}
 
-  // 消隐 (OE=1)
-  LED_EN_GPIO_Port->BSRR = LED_EN_Pin;
+/* ════════════════════════════════════════════════════
+ * SPI1 TX 完成回调：开 OE + 启动 TIM2 调光
+ * ════════════════════════════════════════════════════ */
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi) {
+  if (hspi->Instance != SPI1)
+    return;
+  if (!s_led_enabled || s_brightness == 0)
+    return;
 
-  // 更新地址并切换行指针
-  LED_UpdateRow(row_idx);
-  row_idx = (row_idx + 1) % SCAN_ROWS;
-  p_active_row = &frame_buffer[read_idx][row_idx][0];
+  /* OE=ON（显示当前行） */
+  LED_EN_GPIO_Port->BSRR = (uint32_t)LED_EN_Pin << 16;
 
-  // 锁存当前行
-  LED_LAT_GPIO_Port->BSRR = LED_LAT_Pin;
-  __asm("nop");
-  __asm("nop");
-  LED_LAT_GPIO_Port->BSRR = (uint32_t)LED_LAT_Pin << 16;
-
-  // 重装 DMA (必须手动重启，因为不是 Circular 模式)
-  DMA2_Stream2->CR &= ~DMA_SxCR_EN;
-  while (DMA2_Stream2->CR & DMA_SxCR_EN)
-    ;
-
-  DMA2->LIFCR = 0x3D << 16;
-
-  DMA2_Stream2->M0AR = (uint32_t)&p_active_row[0];
-  DMA2_Stream2->NDTR = DRIVER_WIDTH;
-  DMA2_Stream2->CR |= DMA_SxCR_EN;
-
-  // 【核心】为下一行重新配置硬件计数器
-  p_htim->Instance->RCR = DRIVER_WIDTH - 1;
-  p_htim->Instance->EGR |= TIM_EGR_UG; // 强行把 RCR 装入 shadow 寄存器
-  p_htim->Instance->SR = 0;
-  p_htim->Instance->CNT = 0;
-
-  // 启动硬件
-  for (volatile int i = 0; i < 20; i++)
-    ; // 等待 ABCD 地址线稳定
-  p_htim->Instance->CR1 |= TIM_CR1_CEN;
-  if (!s_led_enabled)
-    return; // 灭屏：OE 保持高电平，不亮
-
-  /* ── TIM2 硬件单次定时器调节 OE 占空比（完全非阻塞） ── */
-  // 先停止 TIM2（防止上一行残留）
-  TIM2->CR1 &= ~TIM_CR1_CEN;
-  TIM2->SR = 0;
-
-  if (s_brightness >= 100) {
-    // 100% 亮度：全行发光，不启动 TIM2
-    LED_EN_GPIO_Port->BSRR = (uint32_t)LED_EN_Pin << 16; // OE=0
-  } else if (s_brightness > 0) {
-    // 部分亮度：OE=0 亮屏，同时启动 TIM2，到期自动关闭 OE
-    TIM2->ARR = (uint32_t)((uint64_t)s_row_cycle_cycles * s_brightness / 100);
+  if (s_brightness < 100) {
+    /* 启动 TIM2 单脉冲：到期关 OE */
+    TIM2->CR1 &= ~TIM_CR1_CEN;
+    TIM2->SR = 0;
+    TIM2->ARR = (uint32_t)(625UL * s_brightness / 100);
     TIM2->CNT = 0;
-    LED_EN_GPIO_Port->BSRR = (uint32_t)LED_EN_Pin << 16; // OE=0
-    TIM2->CR1 |= TIM_CR1_CEN;                            // 启动计时
+    TIM2->CR1 |= TIM_CR1_CEN;
   }
-  // brightness == 0: OE 保持高电平（上一步消隐状态），全灭
+  /* brightness == 100: OE 持续亮到下一行中断 */
 }
 
-void LED_Init(TIM_HandleTypeDef *htim) {
-  p_htim = htim;
-  memset(frame_buffer, 0xff, sizeof(frame_buffer));
+/* ════════════════════════════════════════════════════
+ * TIM2 更新中断：关 OE（亮度控制截止）
+ * ════════════════════════════════════════════════════ */
+void LED_TIM2_IRQHandler(void) {
+  if (TIM2->SR & TIM_SR_UIF) {
+    TIM2->SR = ~TIM_SR_UIF;
+    LED_EN_GPIO_Port->BSRR = LED_EN_Pin; // OE=OFF
+  }
+}
 
-  row_idx = 0;
-  LED_UpdateRow(row_idx);
-  p_active_row = &frame_buffer[read_idx][row_idx][0];
+/* ════════════════════════════════════════════════════
+ * 初始化
+ * ════════════════════════════════════════════════════ */
+void LED_Init(void) {
+  /* 清显存：全灭 */
+  memset(frame_buffer, 0xFF, sizeof(frame_buffer));
 
-  // --- 寄存器级硬件配置 ---
-  // 1. 设置 RCR: 发送 WIDTH 个脉冲后停止 (RCR 从 N 减到 0 触发更新)
-  p_htim->Instance->RCR = DRIVER_WIDTH - 1;
+  s_current_row = 0;
+  LED_UpdateRow(s_current_row);
 
-  // 2. 开启 OPM (单脉冲模式): 硬件数完脉冲后自动清除 CEN 位停止定时器
-  p_htim->Instance->CR1 |= TIM_CR1_OPM;
+  /* ── 初始引脚状态 ── */
+  HAL_GPIO_WritePin(LED_EN_GPIO_Port, LED_EN_Pin, GPIO_PIN_SET);     // OE=OFF
+  HAL_GPIO_WritePin(LED_LAT_GPIO_Port, LED_LAT_Pin, GPIO_PIN_RESET); // LAT=LOW
 
-  // 3. 开启 DMA 请求和主输出
-  p_htim->Instance->DIER |= TIM_DIER_CC2DE;
-  __HAL_TIM_MOE_ENABLE(p_htim);
-
-  // 4. 初次启动 DMA (使用 Normal 模式)
-  // 注意：在 IOC 中虽然是 Circular，但代码里 HAL_DMA_Start 会按 Normal 配置
-  // 建议手动检查 hdma_tim1_ch2.Init.Mode = DMA_NORMAL;
-  HAL_DMA_Start_IT(&hdma_tim1_ch2, (uint32_t)&p_active_row[0],
-                   (uint32_t)&(GPIOA->ODR), DRIVER_WIDTH);
-
-  // 5. 产生一次更新事件，将 RCR 值立即装载到硬件逻辑中
-  p_htim->Instance->EGR |= TIM_EGR_UG;
-  p_htim->Instance->SR = 0; // 清除 UG 产生的标志位
-  p_htim->Instance->CNT = 0;
-
-  // 6. 启动互补输出 PWM (PB0)
-  HAL_TIMEx_PWMN_Start(p_htim, TIM_CHANNEL_2);
-
-  // 初始保持消隐
-  HAL_GPIO_WritePin(LED_EN_GPIO_Port, LED_EN_Pin, GPIO_PIN_SET);
-
-  /* ── TIM2 运行时重配：用于 OE 硬件单次调光 ──
-   *
-   * ⚠ 注意：下面的寄存器配置会覆盖 CubeMX 在 tim.c 中 MX_TIM2_Init() 设置的
-   *   Prescaler / Period 等参数。看代码时不要信 CubeMX 的配置，以这里为准。
-   *
-   *   TIM2 的时钟使能和中断使能仍由 HAL 的 MX_TIM2_Init() + HAL_NVIC 完成，
-   *   无需重复操作。
+  /* ── TIM2 重配置：亮度 PWM ──
+   *  72MHz / (71+1) = 1MHz → 1 tick = 1μs
+   *  OPM 模式：计到 ARR 自动停
    */
-  TIM2->PSC = 0;           // 不分频，1 tick = 1 CPU cycle ≈ 6ns
-  TIM2->EGR |= TIM_EGR_UG; // 产生更新事件，将 PSC 立即装入影子寄存器
-  TIM2->SR = 0;            // 清除 UG 产生的更新标志
-  TIM2->CR1 &=
-      ~TIM_CR1_ARPE;        // 禁用 ARR 预装载：写入 ARR 立即生效（不等待 UEV）
-  TIM2->ARR = 0xFFFF;       // 初始最大值（防误触发）
-  TIM2->CR1 |= TIM_CR1_OPM; // 单脉冲模式：计时完自动停
+  TIM2->PSC = 71;
+  TIM2->EGR |= TIM_EGR_UG; // 装入 PSC
+  TIM2->SR = 0;
+  TIM2->ARR = 625; // 最大一行周期
+  TIM2->CNT = 0;
+  TIM2->CR1 &= ~TIM_CR1_CEN;  // 先停
+  TIM2->CR1 &= ~TIM_CR1_ARPE; // ARR 立即生效
+  TIM2->CR1 |= TIM_CR1_OPM;   // 单脉冲
   TIM2->DIER |= TIM_DIER_UIE; // 使能更新中断
+  // TIM2 NVIC 已在 CubeMX 中使能
 
-  /* ── DWT 测量初始化 ── */
-  s_prev_cyccnt = DWT->CYCCNT;
+  /* ── 启动 TIM1 行刷新 ── */
+  HAL_TIM_Base_Start_IT(&htim1);
 }
 
+/* ════════════════════════════════════════════════════
+ * 反初始化
+ * ════════════════════════════════════════════════════ */
+void LED_DeInit(void) {
+  HAL_TIM_Base_Stop_IT(&htim1);
+  TIM2->CR1 &= ~TIM_CR1_CEN;
+  HAL_SPI_DMAStop(&hspi1);
+  LED_EN_GPIO_Port->BSRR = LED_EN_Pin; // OE=OFF
+}
+
+/* ════════════════════════════════════════════════════
+ * 控制接口
+ * ════════════════════════════════════════════════════ */
 void LED_SetScreenEnable(uint8_t enable) {
   s_led_enabled = enable;
-  // if (enable) {
-  //   // OE=0 → 亮屏
-  //   LED_EN_GPIO_Port->BSRR = (uint32_t)LED_EN_Pin << 16;
-  // } else {
-  //   // OE=1 → 灭屏
-  //   LED_EN_GPIO_Port->BSRR = LED_EN_Pin;
-  // }
+  if (!enable) {
+    LED_EN_GPIO_Port->BSRR = LED_EN_Pin; // OE=OFF
+  }
 }
 
-void LED_SetBrightness(uint8_t brightness) {
-  if (brightness > 100)
-    brightness = 100;
-  s_brightness = brightness;
+void LED_SetBrightness(uint8_t percent) {
+  if (percent > 100)
+    percent = 100;
+  s_brightness = percent;
 }
+
+void LED_SetHorizontalMirror(uint8_t enable) { s_horizontal_mirror = enable; }

@@ -5,6 +5,7 @@
 #include "app.h"
 #include "bsp_rtc.h"
 #include "lcd_driver.h"
+#include "led_driver.h"
 #include "stm32f1xx_hal.h"
 #include "w25q64.h"
 #include <stdio.h>
@@ -24,6 +25,20 @@ void App_Init(void) {
   LCD_ShowString(2, 1, buf);
 
   RTC_App_Init(&hrtc);
+
+  /* ── LED 屏幕初始化 ── */
+  LED_Init();
+
+  /* ── 画一个简单的测试图案：全屏棋盘格 ── */
+  LED_Clear();
+  for (int y = 0; y < LED_HEIGHT; y++) {
+    for (int x = 0; x < LED_WIDTH; x++) {
+      /* 每隔 8 像素交替亮灭 */
+      if (((x / 4) + (y / 4)) & 1)
+        LED_SetPixel(x, y, COLOR_ON);
+    }
+  }
+  LED_Commit();
 }
 
 void App_Loop(void) {

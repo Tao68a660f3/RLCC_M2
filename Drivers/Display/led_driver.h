@@ -2,40 +2,41 @@
 #define __LED_DRIVER_H
 
 #include "main.h"
+#include <stdint.h>
 
-// 屏幕规格 (64 行: 两个 32 行 HUB08 级联)
-#define WIDTH 192
-#define HEIGHT 64
-#define SCAN_ROWS 16
-#define DRIVER_WIDTH (WIDTH + 1) // Hardware Abstraction Layer (HAL) Offset
+/* ── FLUSH 分频：完整扫 N 帧后才真正 swap（防撕裂） ── */
+#define FLUSH_DIV 1
 
-// 显存全局符号 (定义在 led_driver.c，给 window_manager 块搬运直接访问)
-extern uint8_t frame_buffer[2][SCAN_ROWS][DRIVER_WIDTH];
+/* ── 屏幕规格 ────────────────────────────────────────── */
+#define LED_WIDTH 160
+#define LED_HEIGHT 16
+#define LED_SCAN_ROWS 16
+#define BYTES_PER_ROW (LED_WIDTH / 8) // 20
+
+/* ── 双缓冲显存 ────────────────────────────────────── */
+#define LED_BUF_COUNT 2
+extern uint8_t frame_buffer[LED_BUF_COUNT][LED_SCAN_ROWS][BYTES_PER_ROW];
 extern volatile uint8_t write_idx;
 
-// 颜色枚举
-typedef enum {
-  COLOR_BLACK = 0,
-  COLOR_RED = 1,
-  COLOR_GREEN = 2,
-  COLOR_YELLOW = 3
-} LED_Color;
+/* ── 单色颜色枚举 ──────────────────────────────────── */
+typedef enum { COLOR_OFF = 0, COLOR_ON = 1 } LED_Color;
 
-// 引脚宏定义
-#define LED_PORT_DATA                                                          \
-  GPIOA // bit0~3: HUB08#1(R1,G1,R2,G2), bit4~7: HUB08#2(R1',G1',R2',G2')
+/* ── ISR 回调：由 stm32f1xx_it.c 调用 ──────────────── */
+void LED_TIM1_IRQHandler(void);
+void LED_TIM2_IRQHandler(void);
 
-// 函数声明
-void LED_Init(TIM_HandleTypeDef *htim);
-void LED_SetPixel(int16_t x, int16_t y, LED_Color color);
+/* ── API ───────────────────────────────────────────── */
+void LED_Init(void);
+void LED_DeInit(void);
+
+void LED_SetPixel(int16_t x, int16_t y, uint8_t on);
 void LED_Clear(void);
-void LED_ClearAreaAllBuffers(int16_t x, int16_t y, uint16_t w, uint16_t h);
+void LED_Fill(void);
+
 void LED_Commit(void);
 
-/** 屏幕使能控制：enable=1 亮屏 (OE=0)，enable=0 灭屏 (OE=1) */
+void LED_SetBrightness(uint8_t percent); // 0~100
 void LED_SetScreenEnable(uint8_t enable);
-
-/** 设置屏幕亮度 0~100 (0=灭, 100=最亮) */
-void LED_SetBrightness(uint8_t brightness);
+void LED_SetHorizontalMirror(uint8_t enable);
 
 #endif

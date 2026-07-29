@@ -63,6 +63,8 @@ void App_Init(void) {
   window_list[0].scroll_divider = 1; // 每 3 帧滚动一次
   // window_list[0].scroll_step = 1;
   window_list[0].scroll_step = -1; // 向左滚动
+
+  LED_SetBrightness(100);
 }
 
 void App_Loop(void) {

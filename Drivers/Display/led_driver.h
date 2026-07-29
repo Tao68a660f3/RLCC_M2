@@ -22,7 +22,6 @@ extern volatile uint8_t write_idx;
 typedef enum { COLOR_OFF = 0, COLOR_ON = 1 } LED_Color;
 
 /* ── ISR 回调：由 stm32f1xx_it.c 调用 ──────────────── */
-void LED_TIM1_IRQHandler(void);
 void LED_TIM2_IRQHandler(void);
 
 /* ── API ───────────────────────────────────────────── */

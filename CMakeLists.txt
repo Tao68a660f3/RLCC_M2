@@ -54,6 +54,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # 1. 用户源文件（显式列出，避免编译旧文件）
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    Drivers/BSP/MAIN/system_utils.c
+
     # Board 层驱动
     Drivers/Board/lcd_driver.c
     Drivers/Board/bsp_rtc.c
@@ -75,6 +77,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
 # 2. 包含路径
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    Drivers/BSP/MAIN
     Drivers/Board/
     Drivers/Display/
     App/

@@ -1,4 +1,5 @@
 #include "protocol_parser.h"
+#include "env_manager.h"
 #include "lyric_service.h"
 #include "ui_manager.h"
 #include <stdio.h>
@@ -105,6 +106,15 @@ void Protocol_Dispatcher(ProtocolPacket *pkt) {
     break;
   case 0x20:
     RTC_OnTimeSyncReceived(pkt->payload, pkt->len);
+    break;
+  case 0x21:
+    Env_OnTemperatureReceived(pkt->payload, pkt->len);
+    break;
+  case 0x22:
+    Env_OnHumidityReceived(pkt->payload, pkt->len);
+    break;
+  case 0x30:
+    // 同 0x16（非媒体文本透传），UI_Manager_OnProtocolCmd 已在顶部统一处理
     break;
   }
 

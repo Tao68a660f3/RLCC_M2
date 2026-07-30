@@ -117,8 +117,9 @@ void Lyric_OnMetadataReceived(uint8_t *payload, uint8_t len) {
 // 0x11: 时间同步
 void Lyric_OnSyncReceived(uint8_t *payload, uint8_t len) {
   g_sys.is_playing = payload[0];
-  g_sys.remote_time_ms = *(uint32_t *)&payload[1];
-  g_sys.total_ms = *(uint32_t *)&payload[5]; // 如果需要也可以存
+  // 注意：payload 地址不一定 4 字节对齐，必须用 memcpy 避免 HardFault
+  memcpy(&g_sys.remote_time_ms, &payload[1], sizeof(uint32_t));
+  memcpy(&g_sys.total_ms, &payload[5], sizeof(uint32_t));
   g_sys.local_record_tick = HAL_GetTick();
 }
 
@@ -131,8 +132,11 @@ void Lyric_OnSyncReceived(uint8_t *payload, uint8_t len) {
  */
 void Lyric_OnContentReceived(uint8_t cmd, uint8_t *payload, uint8_t len) {
   // --- 1. 偏移量解析 (基于 payload[0] 是 Index) ---
-  uint16_t index = *(uint16_t *)&payload[0];
-  uint32_t start_time = *(uint32_t *)&payload[2];
+  // 注意：payload 地址不一定 4 字节对齐，必须用 memcpy 避免 HardFault
+  uint16_t index;
+  memcpy(&index, &payload[0], sizeof(uint16_t));
+  uint32_t start_time;
+  memcpy(&start_time, &payload[2], sizeof(uint32_t));
   LyricArea *slot = NULL;
 
   // --- 2. 查找 Slot (查重) ---
@@ -178,7 +182,9 @@ void Lyric_OnContentReceived(uint8_t cmd, uint8_t *payload, uint8_t len) {
     uint8_t *p_data = &payload[7];
 
     for (int i = 0; i < word_count; i++) {
-      uint16_t word_offset = *(uint16_t *)p_data;
+      // 注意：p_data 地址不一定对齐，用 memcpy 避免 HardFault
+      uint16_t word_offset;
+      memcpy(&word_offset, p_data, sizeof(uint16_t));
       slot->duration = word_offset; // 最后一个字的时间偏移就是整行时长
       uint8_t w_len = p_data[2];
       p_data += 3;
@@ -195,7 +201,8 @@ void Lyric_OnContentReceived(uint8_t cmd, uint8_t *payload, uint8_t len) {
 
   } else if (cmd == 0x15) { // 增强原文行:
                             // [Index:2B][StartTime:4B][EndTime:4B][Text...]
-    uint32_t end_time = *(uint32_t *)&payload[6];
+    uint32_t end_time;
+    memcpy(&end_time, &payload[6], sizeof(uint32_t));
     if (end_time > start_time)
       slot->duration = end_time - start_time;
     else

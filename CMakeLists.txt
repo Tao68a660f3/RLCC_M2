@@ -74,6 +74,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # App 层
     App/app.c
     App/com_manager.c
+    App/env_manager.c
     App/event_manager.c
     App/lyric_service.c
     App/protocol_parser.c

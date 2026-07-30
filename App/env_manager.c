@@ -1,5 +1,4 @@
 #include "env_manager.h"
-#include "i2c.h"
 #include "lyric_service.h"
 #include "rtc.h"
 #include <stdint.h>
@@ -8,9 +7,24 @@
 
 #define CELSIUS "\02"
 
-// --- 静态资源：英文查表 ---
+// --- 静态资源：中英文星期查表 ---
 static const char *WEEK_NAMES[] = {"SUN", "MON", "TUE", "WED",
                                    "THU", "FRI", "SAT"};
+// GB2312: 星期日一二三四五六
+static const uint8_t WEEK_CN[7][3] = {
+    {0xC8, 0xD5, 0x00}, // 日
+    {0xD2, 0xBB, 0x00}, // 一
+    {0xB6, 0xFE, 0x00}, // 二
+    {0xC8, 0xFD, 0x00}, // 三
+    {0xCB, 0xC4, 0x00}, // 四
+    {0xCE, 0xE5, 0x00}, // 五
+    {0xC1, 0xF9, 0x00}, // 六
+};
+static const uint8_t STR_XING[2] = {0xD0, 0xC7}; // 星
+static const uint8_t STR_QI[2] = {0xC6, 0xDA};   // 期
+static const uint8_t STR_NIAN[2] = {0xC4, 0xEA}; // 年
+static const uint8_t STR_YUE[2] = {0xD4, 0xC2};  // 月
+static const uint8_t STR_RI[2] = {0xC8, 0xD5};   // 日
 
 // --- 全局影子变量初始化 ---
 char g_str_time[9] = "00:00:00";
@@ -18,20 +32,21 @@ char g_str_time_s[7] = "00:00";
 char g_str_date_std[11] = "2000-01-01";
 char g_str_date_md[6] = "01/01";
 char g_str_week_en[4] = "???";
+char g_str_week_cn[7] = "?";
+char g_str_date_cn[17] = "2000?01?01?";
 char g_str_temp[7] = "--.-" CELSIUS;
 char g_str_humi[5] = "--%";
 char g_str_ampm[3] = "";
 
 TimeFormat_t g_time_format_config = TIME_FORMAT_24H;
 
-// 温湿度舒适度等级
-ComfortLevel_t g_temp_comfort = COMFORT_GREEN;
-ComfortLevel_t g_humi_comfort = COMFORT_GREEN;
+// 环境数据超时（30 秒无更新则清空）
+#define ENV_TIMEOUT_MS 30000
+static uint32_t last_temp_update_tick = 0;
+static uint32_t last_humi_update_tick = 0;
 
 // 内部状态记录
 static RTC_DateTimeTypeDef last_sync_time;
-static AHT30_HandleTypeDef s_haht30;
-static uint32_t last_aht_trigger_tick = 0;
 static uint32_t last_rtc_read_tick = 0;
 
 /**
@@ -73,7 +88,7 @@ static void _Env_Refine_Time(RTC_DateTimeTypeDef *t) {
   g_str_time[5] = ':';
   _uitoa_2d(t->seconds, &g_str_time[6]);
   g_str_time[8] = '\0';
-  g_str_time_s[5] = '\0'; // fix: missing null terminator
+  g_str_time_s[5] = '\0';
 
   if (g_str_time[0] == '0') {
     g_str_time[0] = ' ';
@@ -106,20 +121,50 @@ static void _Env_Refine_Date(RTC_DateTimeTypeDef *t) {
   uint8_t wix = (t->weekday == 7) ? 0 : t->weekday;
   strncpy(g_str_week_en, WEEK_NAMES[wix], 3);
   g_str_week_en[3] = '\0';
+
+  // 星期 (GB2312): "星期X"
+  uint8_t *p = (uint8_t *)g_str_week_cn;
+  *p++ = STR_XING[0];
+  *p++ = STR_XING[1];
+  *p++ = STR_QI[0];
+  *p++ = STR_QI[1];
+  *p++ = WEEK_CN[wix][0];
+  *p++ = WEEK_CN[wix][1];
+  *p = 0;
+
+  // 日期 (GB2312): "2026年02月21日"
+  p = (uint8_t *)g_str_date_cn;
+  // 年 4 位
+  uint16_t y = t->year;
+  *p++ = (y / 1000) + '0';
+  *p++ = (y / 100 % 10) + '0';
+  *p++ = (y / 10 % 10) + '0';
+  *p++ = (y % 10) + '0';
+  *p++ = STR_NIAN[0];
+  *p++ = STR_NIAN[1];
+  // 月 2 位
+  *p++ = (t->month / 10) + '0';
+  *p++ = (t->month % 10) + '0';
+  *p++ = STR_YUE[0];
+  *p++ = STR_YUE[1];
+  // 日 2 位
+  *p++ = (t->day / 10) + '0';
+  *p++ = (t->day % 10) + '0';
+  *p++ = STR_RI[0];
+  *p++ = STR_RI[1];
+  *p = 0;
 }
 
 void Env_Manager_Init(void) {
-  // --- 1. 初始化 AHT30 传感器（env_manager 自己持有）---
-  AHT30_Init(&s_haht30);
-
-  // --- 2. 强制进行第一次同步读取 ---
+  // --- 强制进行第一次同步读取 ---
   RTC_GetDateTime(&hrtc, &last_sync_time);
   _Env_Refine_Time(&last_sync_time);
   _Env_Refine_Date(&last_sync_time);
 
-  // --- 3. 初始化传感器计时器 ---
-  last_aht_trigger_tick = HAL_GetTick();
+  // --- 初始化计时器 ---
   last_rtc_read_tick = HAL_GetTick();
+  last_temp_update_tick = HAL_GetTick();
+  last_humi_update_tick = HAL_GetTick();
 }
 
 void Env_Manager_Tick(void) {
@@ -147,9 +192,6 @@ void Env_Manager_Tick(void) {
     _Env_Refine_Date(&sync_time);
 
     g_sys.rtc_dirty = 0;
-
-    // printf("[RTC] Time Sync Applied: %04d-%02d-%02d\r\n", sync_time.year,
-    //  sync_time.month, sync_time.day);
   }
 
   // --- 2. RTC 定时读取 (每 250ms 读一次) ---
@@ -167,43 +209,12 @@ void Env_Manager_Tick(void) {
     last_rtc_read_tick = now;
   }
 
-  // --- 2.5 AHT30 状态机驱动（每帧调用，内部非阻塞）---
-  AHT30_Process_Background(&hi2c1, &s_haht30);
-
-  // --- 3. AHT30 数据读取（每 3s 取一次最新值）---
-  if (now - last_aht_trigger_tick > 3000) {
-    float temp = 0.0f, hum = 0.0f;
-    uint8_t aht_ok = AHT30_Get_SafeData(&s_haht30, &temp, &hum);
-    if (aht_ok) {
-      int t_int = (int)temp;
-      int t_dec = (int)(temp * 10) % 10;
-      if (t_dec < 0)
-        t_dec = -t_dec;
-
-      snprintf(g_str_temp, sizeof(g_str_temp), "%2d.%d" CELSIUS, t_int, t_dec);
-      snprintf(g_str_humi, sizeof(g_str_humi), "%2d%%", (int)hum);
-      printf("report: Temp: %.1f C, Humi: %.1f %%\r\n", temp, hum);
-
-      // 温度舒适度
-      if (temp >= 18.0f && temp <= 26.0f)
-        g_temp_comfort = COMFORT_GREEN;
-      else if (temp >= 14.0f && temp <= 32.0f)
-        g_temp_comfort = COMFORT_YELLOW;
-      else
-        g_temp_comfort = COMFORT_RED;
-
-      // 湿度舒适度
-      if (hum >= 40.0f && hum <= 70.0f)
-        g_humi_comfort = COMFORT_GREEN;
-      else if (hum >= 30.0f && hum <= 80.0f)
-        g_humi_comfort = COMFORT_YELLOW;
-      else
-        g_humi_comfort = COMFORT_RED;
-    } else {
-      strcpy(g_str_temp, "--.-" CELSIUS);
-      strcpy(g_str_humi, "--%");
-    }
-    last_aht_trigger_tick = now;
+  // --- 3. 环境数据超时清空（30 秒无更新） ---
+  if (now - last_temp_update_tick > ENV_TIMEOUT_MS) {
+    strcpy(g_str_temp, "--.-" CELSIUS);
+  }
+  if (now - last_humi_update_tick > ENV_TIMEOUT_MS) {
+    strcpy(g_str_humi, "--%");
   }
 }
 
@@ -221,4 +232,23 @@ void RTC_OnTimeSyncReceived(uint8_t *payload, uint8_t len) {
     g_sys.rtc_buf[i] = payload[i];
   }
   g_sys.rtc_dirty = 1;
+}
+
+void Env_OnTemperatureReceived(uint8_t *payload, uint8_t len) {
+  if (len < 2)
+    return;
+  int t_int = (int8_t)payload[0];
+  int t_dec = payload[1];
+  if (t_dec < 0)
+    t_dec = -t_dec;
+  snprintf(g_str_temp, sizeof(g_str_temp), "%2d.%d" CELSIUS, t_int, t_dec);
+  last_temp_update_tick = HAL_GetTick();
+}
+
+void Env_OnHumidityReceived(uint8_t *payload, uint8_t len) {
+  if (len < 2)
+    return;
+  int h_int = payload[0];
+  snprintf(g_str_humi, sizeof(g_str_humi), "%2d%%", h_int);
+  last_humi_update_tick = HAL_GetTick();
 }

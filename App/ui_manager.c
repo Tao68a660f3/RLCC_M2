@@ -86,7 +86,12 @@ static void _UpdateSmoothTime(void) {
     if (delta > SEEK_THRESHOLD_MS) {
       s_smooth = raw;
     } else {
-      s_smooth += 1;
+      uint32_t step = (delta + 4) / 8;
+      if (step < 1)
+        step = 1;
+      if (step > delta)
+        step = delta;
+      s_smooth -= step;
     }
   }
 
@@ -252,6 +257,12 @@ void UI_Manager_Tick(void) {
           copy_len = TXT_BUF_SIZE - 1;
         memcpy(s_shared_text, curr->text, copy_len);
         s_shared_text[copy_len] = '\0';
+        s_text_updated = 1;
+      }
+    } else {
+      // 未匹配到歌词（切歌间隙 / 播放结束），清空显示
+      if (s_shared_text[0] != '\0') {
+        s_shared_text[0] = '\0';
         s_text_updated = 1;
       }
     }

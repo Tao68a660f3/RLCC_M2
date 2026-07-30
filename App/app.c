@@ -6,6 +6,7 @@
 #include "bsp_rtc.h"
 #include "canvas_renderer.h"
 #include "com_manager.h"
+#include "env_manager.h"
 #include "font_config.h"
 #include "lcd_driver.h"
 #include "led_display.h"
@@ -27,10 +28,6 @@ void App_Init(void) {
   LCD_ShowString(1, 1, "System Ready");
 
   W25Q64_Init(&hspi2);
-  uint32_t id = W25Q64_ReadID();
-  char buf[17];
-  snprintf(buf, sizeof(buf), "W25Q ID:0x%06X", id);
-  LCD_ShowString(2, 1, buf);
 
   RTC_App_Init(&hrtc);
 
@@ -63,30 +60,26 @@ void App_Init(void) {
   Window_SetAlignment(0, ALIGN_CENTER);
 
   LED_SetBrightness(100);
+  LCD_Clear();
 }
 
 void App_Loop(void) {
   static uint32_t last_tick = 0;
   LCD_Task_Handler();
 
-  /* ── 串口数据处理（根据当前系统模式分发） ── */
-  if (g_curr_sys_mode == SYS_MODE_TXT_MODE) {
-    COM_Process_TextMode();
-  } else {
-    COM_Process_ProtocolMode();
-  }
+  /* ── 串口数据处理：统一走协议解析（文本透传由 cmd=0x16 分发处理） ── */
+  COM_Process_ProtocolMode();
+
+  /* ── 环境管理器 Tick（RTC 同步 + 温湿度超时） ── */
+  Env_Manager_Tick();
 
   /* ── UI 管理器 Tick（歌词查找 + 窗口刷新） ── */
   UI_Manager_Tick();
 
-  if (HAL_GetTick() - last_tick >= 1000) {
-    RTC_DateTimeTypeDef dt;
-    if (RTC_GetDateTime(&hrtc, &dt)) {
-      char buf[18];
-      snprintf(buf, sizeof(buf), "RTC: %02d:%02d:%02d", dt.hours, dt.minutes,
-               dt.seconds);
-      LCD_ShowString(1, 1, buf);
-    }
+  if (HAL_GetTick() - last_tick >= 250) {
+    LCD_ShowString(1, 1, g_str_date_cn);
+    LCD_ShowString(2, 1, g_str_week_cn);
+    LCD_ShowString(2, 5, g_str_time);
     last_tick = HAL_GetTick();
   }
 }

@@ -30,6 +30,7 @@ extern TimeFormat_t g_time_format_config;
 void Env_Manager_Init(void);
 void Env_Manager_Tick(void);
 void Env_Manager_SetFormat(TimeFormat_t format);
+void Env_Manager_ShowDateTime(void);
 
 // 串口对时分发目标
 void RTC_OnTimeSyncReceived(uint8_t *payload, uint8_t len);

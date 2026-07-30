@@ -101,6 +101,27 @@ void LED_Clear(void) {
   memset(frame_buffer, 0xFF, sizeof(frame_buffer)); // 全 1 = 全灭
 }
 
+/** 清除指定物理区域在两个双缓冲中的像素 */
+void LED_ClearAreaAllBuffers(int16_t x, int16_t y, uint16_t w, uint16_t h) {
+  for (int buf = 0; buf < LED_BUF_COUNT; buf++) {
+    for (uint16_t row = 0; row < h; row++) {
+      int16_t sy = y + (int16_t)row;
+      if (sy < 0 || sy >= LED_HEIGHT)
+        continue;
+      uint8_t sr = (uint8_t)(sy & (LED_SCAN_ROWS - 1));
+      uint8_t *fb_row = frame_buffer[buf][sr];
+      for (int16_t col = 0; col < (int16_t)w; col += 8) {
+        int16_t sx = x + col;
+        if (sx >= LED_WIDTH)
+          break;
+        if (sx < 0)
+          continue;
+        fb_row[(uint16_t)(sx >> 3)] = 0xFF; // 全灭
+      }
+    }
+  }
+}
+
 void LED_Fill(void) {
   memset(frame_buffer, 0x00, sizeof(frame_buffer)); // 全 0 = 全亮
 }

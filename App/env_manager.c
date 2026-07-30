@@ -1,4 +1,5 @@
 #include "env_manager.h"
+#include "lcd_driver.h"
 #include "lyric_service.h"
 #include "rtc.h"
 #include <stdint.h>
@@ -215,6 +216,19 @@ void Env_Manager_Tick(void) {
   }
   if (now - last_humi_update_tick > ENV_TIMEOUT_MS) {
     strcpy(g_str_humi, "--%");
+  }
+}
+
+/**
+ * @brief  刷新日期/时间到 LCD 屏幕（每 250ms 限频一次）
+ */
+void Env_Manager_ShowDateTime(void) {
+  static uint32_t last_lcd_tick = 0;
+  if (HAL_GetTick() - last_lcd_tick >= 250) {
+    LCD_ShowString(1, 1, g_str_date_cn);
+    LCD_ShowString(2, 1, g_str_week_cn);
+    LCD_ShowString(2, 5, g_str_time);
+    last_lcd_tick = HAL_GetTick();
   }
 }
 

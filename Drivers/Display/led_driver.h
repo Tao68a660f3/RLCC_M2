@@ -30,6 +30,7 @@ void LED_DeInit(void);
 
 void LED_SetPixel(int16_t x, int16_t y, uint8_t on);
 void LED_Clear(void);
+void LED_ClearAreaAllBuffers(int16_t x, int16_t y, uint16_t w, uint16_t h);
 void LED_Fill(void);
 
 void LED_Commit(void);

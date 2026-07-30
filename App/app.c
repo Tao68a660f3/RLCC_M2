@@ -21,15 +21,25 @@
 
 extern RTC_HandleTypeDef hrtc;
 extern SPI_HandleTypeDef hspi2;
+extern UART_HandleTypeDef huart1;
+
+const char start_info_txt[] = {
+    0xCF, 0xB5, 0xCD, 0xB3, 0xC6, 0xF4, 0xB6,
+    0xAF, 0xD6, 0xD0, 0x2E, 0x2E, 0x2E, 0x00}; // 系统启动中...
 
 void App_Init(void) {
-  LCD_Init();
-  LCD_WaitReady();
-  LCD_ShowString(1, 1, "System Ready");
+  /* ── 串口初始化（DMA接收 + 空闲中断） ── */
+  COM_Init(&huart1);
 
   W25Q64_Init(&hspi2);
-
   RTC_App_Init(&hrtc);
+  Env_Manager_Init();
+  Env_Manager_Tick();
+
+  LCD_Init();
+  LCD_WaitReady();
+  LCD_ShowString(1, 1, start_info_txt);
+  LCD_WaitReady(); /* 强制刷新队列，确保启动信息在进入 Loop 前显示到 LCD */
 
   /* ── LED 屏幕初始化 ── */
   LED_Init();
@@ -44,27 +54,16 @@ void App_Init(void) {
 
   /* ── 应用层模块初始化 ── */
   LyricService_Init();
-  UI_Manager_Init();
   Protocol_Init();
+  UI_Manager_Init();
 
-  /* ── 串口初始化（DMA接收 + 空闲中断） ── */
-  extern UART_HandleTypeDef huart1;
-  COM_Init(&huart1);
+  /* LED 同步显示启动信息（不依赖 App_Loop 中的 Tick 循环） */
+  UI_Manager_ShowTextSync(start_info_txt);
 
-  /* ── 清屏显示初始文本 ── */
-  LED_Clear();
-  Font_Select_ASC(FONT_ASC_1608);
-  Font_Select_GBK(FONT_GBK_1616S);
-  Window_Config(0, 0, 0, 160, 16);
-  Window_FillText(0, "RLCC Ready", 1, CANVAS_R, VALIGN_MIDDLE);
-  Window_SetAlignment(0, ALIGN_CENTER);
-
-  LED_SetBrightness(100);
-  LCD_Clear();
+  HAL_Delay(2500);
 }
 
 void App_Loop(void) {
-  static uint32_t last_tick = 0;
   LCD_Task_Handler();
 
   /* ── 串口数据处理：统一走协议解析（文本透传由 cmd=0x16 分发处理） ── */
@@ -76,10 +75,6 @@ void App_Loop(void) {
   /* ── UI 管理器 Tick（歌词查找 + 窗口刷新） ── */
   UI_Manager_Tick();
 
-  if (HAL_GetTick() - last_tick >= 250) {
-    LCD_ShowString(1, 1, g_str_date_cn);
-    LCD_ShowString(2, 1, g_str_week_cn);
-    LCD_ShowString(2, 5, g_str_time);
-    last_tick = HAL_GetTick();
-  }
+  /* ── 刷新日期/时间到 LCD ── */
+  Env_Manager_ShowDateTime();
 }

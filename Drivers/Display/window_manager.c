@@ -183,6 +183,9 @@ void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
 
   LED_Window *win = &window_list[win_idx];
 
+  // 清除旧窗口物理区域（防止切换/切歌时残留）
+  LED_ClearAreaAllBuffers(win->x, win->y, win->w, win->h);
+
   // --- 1. 测量阶段 ---
   Size2D size = _Window_MeasureText(str);
 

@@ -1,4 +1,5 @@
 #include "ui_manager.h"
+#include "app.h"
 #include "font_config.h"
 #include "led_driver.h"
 #include "lyric_service.h"
@@ -17,7 +18,35 @@ static uint8_t s_screen_off = 0;
 // ============================= 共享文本缓冲区 =============================
 #define TXT_BUF_SIZE 512
 static char s_shared_text[TXT_BUF_SIZE] = "";
-static uint8_t s_text_updated = 0; // 新文本到达标记（触发窗口刷新）
+static uint8_t s_text_updated = 0;
+
+/** 标题保护标志：切歌设标题后，第一条非空歌词到来前保护标题不被空歌词覆盖 */
+static uint8_t s_title_guarded = 0;
+
+/** 安全拷贝字符串到共享缓冲区并标记更新 */
+static void _SetText(const char *text) {
+  uint32_t copy_len = strlen(text);
+  if (copy_len >= TXT_BUF_SIZE)
+    copy_len = TXT_BUF_SIZE - 1;
+  memcpy(s_shared_text, text, copy_len);
+  s_shared_text[copy_len] = '\0';
+  s_text_updated = 1;
+}
+
+/** 清空共享缓冲区并标记更新 */
+static void _ClearText(void) {
+  if (s_shared_text[0] == '\0')
+    return; // 已为空，无需操作
+  s_shared_text[0] = '\0';
+  s_text_updated = 1;
+}
+
+/** 清除窗口 0 物理区域两个缓冲 */
+static void _ClearWindow0(void) {
+  LED_Window *win = &window_list[0];
+  if (win->is_active)
+    LED_ClearAreaAllBuffers(win->x, win->y, win->w, win->h);
+}
 
 /**
  * @brief 用当前文本刷新窗口 0 的显示
@@ -26,7 +55,7 @@ static void _FlushTextToWindow(void) {
   Font_Select_ASC(FONT_ASC_1608);
   Font_Select_GBK(FONT_GBK_1616S);
 
-  Window_FillText(0, s_shared_text, C_RED, CANVAS_R, VALIGN_MIDDLE);
+  Window_FillText(0, s_shared_text, COLOR_ON, CANVAS_R, VALIGN_MIDDLE);
 
   // 超出宽度则开启滚动
   LED_Window *win = &window_list[0];
@@ -107,10 +136,29 @@ static void _UpdateSmoothTime(void) {
 static LyricArea *_FindCurrentLyric(uint32_t now) {
   for (uint32_t i = 0; i < g_sys.active_count; i++) {
     LyricArea *a = g_sys.sorted_lyrics[i];
-    if (now >= a->start_time_ms && now < (a->start_time_ms + a->duration))
+    uint32_t a_end = a->start_time_ms + a->duration;
+
+    // 情形A：当前时间正在本行区间内
+    if (now >= a->start_time_ms && now <= a_end)
       return a;
+
+    // 情形B：尚未到达本行 → 退 1 行保持显示
+    if (now < a->start_time_ms)
+      return (i > 0) ? g_sys.sorted_lyrics[i - 1] : g_sys.sorted_lyrics[0];
+
+    // 情形C：本行已过期 → 检查下一行是否需要提前切入
+    if ((i + 1) < g_sys.active_count) {
+      LyricArea *next = g_sys.sorted_lyrics[i + 1];
+      // 跳过 cmd=0x13（间奏行）
+      if (next->cmd == 0x13 && (i + 2) < g_sys.active_count)
+        next = g_sys.sorted_lyrics[i + 2];
+      // 距下一行开始不到 1.5s → 提前切换
+      if ((now + 1500) >= next->start_time_ms &&
+          next->start_time_ms > (a->start_time_ms + a->duration))
+        return next;
+    }
   }
-  return NULL;
+  return g_sys.sorted_lyrics[0];
 }
 
 //
@@ -136,10 +184,10 @@ void UI_Manager_OnProtocolCmd(uint8_t cmd, uint8_t *payload, uint8_t len) {
 
   if (cmd == 0x16) {
     // cmd=0x16: 切到文本透传模式
-    if (g_curr_sys_mode != SYS_MODE_TXT_MODE) {
+    if (g_curr_sys_mode != SYS_MODE_TXT_MODE)
       UI_Manager_SetSysMode(SYS_MODE_TXT_MODE);
-    }
 
+    // 安全截取 payload 到共享缓冲区
     uint32_t copy_len = (len < TXT_BUF_SIZE - 1) ? len : (TXT_BUF_SIZE - 1);
     memcpy(s_shared_text, payload, copy_len);
     s_shared_text[copy_len] = '\0';
@@ -153,9 +201,8 @@ void UI_Manager_OnProtocolCmd(uint8_t cmd, uint8_t *payload, uint8_t len) {
   }
 
   // cmd=0x10~0x15: 切到歌词模式
-  if (g_curr_sys_mode != SYS_MODE_PROTOCOL_MODE) {
+  if (g_curr_sys_mode != SYS_MODE_PROTOCOL_MODE)
     UI_Manager_SetSysMode(SYS_MODE_PROTOCOL_MODE);
-  }
   // 歌词数据由 Lyric_OnXXXReceived 处理，UI 侧在 Tick 中按时间查找
 }
 
@@ -187,11 +234,10 @@ void UI_Manager_SetMode_ENV(void) {
 }
 
 void UI_Manager_NextUIMode(void) {
-  if (g_curr_ui_mode == UI_MODE_COMMON) {
+  if (g_curr_ui_mode == UI_MODE_COMMON)
     UI_Manager_SetMode_ENV();
-  } else {
+  else
     UI_Manager_SetMode_COMMON();
-  }
 }
 
 void UI_Manager_SetSysMode(Sys_Mode_t mode) {
@@ -202,9 +248,8 @@ void UI_Manager_SetSysMode(Sys_Mode_t mode) {
   s_text_updated = 0;
 
   // 重新配置窗口布局（行数 / 字体适应新模式）
-  if (g_curr_ui_mode == UI_MODE_COMMON) {
+  if (g_curr_ui_mode == UI_MODE_COMMON)
     UI_Manager_SetMode_COMMON();
-  }
 }
 
 void UI_Manager_ToggleSysMode(void) {
@@ -214,15 +259,7 @@ void UI_Manager_ToggleSysMode(void) {
   UI_Manager_SetSysMode(next);
 }
 
-void UI_Manager_OnTextLineReceived(const char *text) {
-  // 外部手动喂文本
-  uint32_t copy_len = strlen(text);
-  if (copy_len >= TXT_BUF_SIZE)
-    copy_len = TXT_BUF_SIZE - 1;
-  memcpy(s_shared_text, text, copy_len);
-  s_shared_text[copy_len] = '\0';
-  s_text_updated = 1;
-}
+void UI_Manager_OnTextLineReceived(const char *text) { _SetText(text); }
 
 void UI_Manager_ToggleScreen(void) {
   s_screen_off = !s_screen_off;
@@ -238,33 +275,61 @@ void UI_Manager_WakeScreen(void) {
   }
 }
 
+// ============================= 初始化时 LED 同步显示
+// =============================
+/**
+ * @brief 在 App_Init 阶段同步显示文本到 LED 屏幕
+ *        直接设置文本、刷新窗口、提交显存，不依赖 Tick 循环
+ */
+void UI_Manager_ShowTextSync(const char *text) {
+  _SetText(text);
+  _ClearWindow0();
+  _FlushTextToWindow();
+
+  // 同步渲染到显存并提交
+  Window_BlitToScreen(&window_list[0], 0xFFFF, 0, 0, 0, 0);
+  LED_Commit();
+  Window_BlitToScreen(&window_list[0], 0xFFFF, 0, 0, 0, 0);
+  LED_Commit();
+}
+
 // ============================= Tick：主循环唯一入口
 // =============================
 void UI_Manager_Tick(void) {
   extern volatile uint8_t need_commit;
 
+  // 切歌标志：清除旧歌词残留，显示标题
+  if (media_updated) {
+    media_updated = 0;
+
+    if (g_sys.title[0] != '\0') {
+      _SetText(g_sys.title);
+      s_title_guarded = 1; // 设标题保护，防止后续空歌词覆盖
+    } else {
+      _ClearText();
+      s_title_guarded = 0;
+    }
+
+    _ClearWindow0();
+  }
+
   // ---- 歌词模式：更新平滑时间 + 查找当前歌词 ----
   if (g_curr_sys_mode == SYS_MODE_PROTOCOL_MODE) {
     _UpdateSmoothTime();
 
-    // 按时间查找歌词
     LyricArea *curr = _FindCurrentLyric(g_play_time_ms);
     if (curr) {
-      // 找到当前行，拷贝到共享缓冲区（仅当文本变化时）
-      if (strcmp(s_shared_text, curr->text) != 0) {
-        uint32_t copy_len = strlen(curr->text);
-        if (copy_len >= TXT_BUF_SIZE)
-          copy_len = TXT_BUF_SIZE - 1;
-        memcpy(s_shared_text, curr->text, copy_len);
-        s_shared_text[copy_len] = '\0';
-        s_text_updated = 1;
+      // 保护中 && 空文本 → 跳过，保留标题
+      if (s_title_guarded && curr->text[0] == '\0') {
+        // 什么都不做，标题继续显示
+      } else if (strcmp(s_shared_text, curr->text) != 0) {
+        _SetText(curr->text);
+        s_title_guarded = 0; // 有真实内容了，解除保护
       }
     } else {
-      // 未匹配到歌词（切歌间隙 / 播放结束），清空显示
-      if (s_shared_text[0] != '\0') {
-        s_shared_text[0] = '\0';
-        s_text_updated = 1;
-      }
+      // 未匹配到歌词（切歌间隙 / 播放结束），仅在非保护状态时清空
+      if (!s_title_guarded)
+        _ClearText();
     }
   }
 
@@ -281,6 +346,5 @@ void UI_Manager_Tick(void) {
   }
 
   // ---- 驱动窗口渲染 ----
-  /* ── 窗口管理器处理 ── */
   WindowManager_Process();
 }

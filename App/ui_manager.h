@@ -31,6 +31,9 @@ void UI_Manager_NextUIMode(void);
 void UI_Manager_SetSysMode(Sys_Mode_t mode);
 void UI_Manager_ToggleSysMode(void);
 
+/** 在 App_Init 阶段同步显示文本到 LED 屏幕（不依赖 Tick 循环） */
+void UI_Manager_ShowTextSync(const char *text);
+
 // 文本模式：COM 层拆出完整行后回调此函数，填充共享缓冲区
 void UI_Manager_OnTextLineReceived(const char *text);
 

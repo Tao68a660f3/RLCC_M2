@@ -1,5 +1,6 @@
 #include "protocol_parser.h"
 #include "lyric_service.h"
+#include "ui_manager.h"
 #include <stdio.h>
 
 // #define DEBUG_PRT
@@ -79,80 +80,13 @@ uint8_t Protocol_FeedByte(uint8_t byte, ProtocolPacket *out_pkt) {
   return 0;
 }
 
-/*
-typedef enum {
-    ST_IDLE,
-    ST_CMD,
-    ST_LEN,
-    ST_PAYLOAD,
-    ST_CHECK,
-    ST_ERROR  // 新增错误状态
-} State_t;
-
-uint8_t Protocol_FeedByte(uint8_t byte, ProtocolPacket *out_pkt) {
-    // 在错误状态下，唯一的出口是检测到合法的起始头 0xAA
-    if (current_state == ST_ERROR) {
-        if (byte == 0xAA) {
-            current_state = ST_CMD;
-            calc_checksum = 0;
-            return 0;
-        }
-        return 0; // 继续等待
-    }
-
-    switch (current_state) {
-        case ST_IDLE:
-            if (byte == 0xAA) {
-                current_state = ST_CMD;
-                calc_checksum = 0;
-            }
-            break;
-
-        case ST_CMD:
-            out_pkt->cmd = byte;
-            calc_checksum ^= byte; // 补齐校验
-            current_state = ST_LEN;
-            break;
-
-        case ST_LEN:
-            // 鲁棒性关键：检查长度是否超过 A1 的缓冲区限制
-            if (byte > MAX_PAYLOAD_SIZE) {
-                current_state = ST_ERROR;
-                return 0;
-            }
-            out_pkt->len = byte;
-            calc_checksum ^= byte; // 补齐校验
-            payload_cnt = 0;
-            current_state = (byte == 0) ? ST_CHECK : ST_PAYLOAD;
-            break;
-
-        case ST_PAYLOAD:
-            out_pkt->payload[payload_cnt++] = byte;
-            calc_checksum ^= byte;
-            if (payload_cnt >= out_pkt->len) {
-                current_state = ST_CHECK;
-            }
-            break;
-
-        case ST_CHECK:
-            current_state = ST_IDLE;
-            if (byte == calc_checksum) {
-                // 成功解析后，为字符串补齐结束符，确保滚动显示安全
-                out_pkt->payload[out_pkt->len] = '\0';
-                return 1;
-            } else {
-                current_state = ST_ERROR; // 校验失败进入错误状态
-            }
-            break;
-    }
-    return 0;
-}
-*/
-
 // ---------------------------------------------------------
 // 协议分发器：解析成功后，会根据命令码跳转到对应的处理函数
 // ---------------------------------------------------------
 void Protocol_Dispatcher(ProtocolPacket *pkt) {
+  // 先通知 UI 管理器协议命令（用于模式切换）
+  UI_Manager_OnProtocolCmd(pkt->cmd, pkt->payload, pkt->len);
+
   switch (pkt->cmd) {
   case 0x10:
     Lyric_OnMetadataReceived(pkt->payload, pkt->len);
@@ -164,8 +98,10 @@ void Protocol_Dispatcher(ProtocolPacket *pkt) {
   case 0x13:
   case 0x14:
   case 0x15:
-  case 0x16:
     Lyric_OnContentReceived(pkt->cmd, pkt->payload, pkt->len);
+    break;
+  case 0x16:
+    // cmd=0x16 纯文本：由 UI_Manager_OnProtocolCmd 直接处理，不进歌词池
     break;
   case 0x20:
     RTC_OnTimeSyncReceived(pkt->payload, pkt->len);

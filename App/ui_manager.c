@@ -69,64 +69,81 @@ static void _FlushTextToWindow(void) {
   }
 }
 
-// ============================= EWMA 平滑播放时间（歌词模式）
-// =============================
+// =============== 平滑播放时间（歌词模式） ===============
 uint32_t g_play_time_ms = 0;
 
+/**
+ * @brief 纯整数微秒级 PID 速度微调 Smoothing
+ */
 static void _UpdateSmoothTime(void) {
-  static uint32_t s_smooth = 0;
+  static uint32_t s_smooth_ms = 0;
+  static uint32_t s_smooth_sub_ms = 0; // 毫秒的小数部分 (范围 0~999，即微秒)
+  static uint32_t s_last_tick = 0;
 
+  uint32_t now_tick = HAL_GetTick();
+  if (s_last_tick == 0) {
+    s_last_tick = now_tick;
+  }
+  uint32_t dt = now_tick - s_last_tick; // 130FPS 下 dt 通常为 7ms 或 8ms
+  s_last_tick = now_tick;
+
+  // 1. 边界拦截
   if (g_sys.local_record_tick == 0) {
     g_play_time_ms = 0;
     return;
   }
-
   if (!g_sys.is_playing) {
-    s_smooth = g_sys.remote_time_ms;
+    s_smooth_ms = g_sys.remote_time_ms;
+    s_smooth_sub_ms = 0;
     g_play_time_ms = g_sys.remote_time_ms;
     return;
   }
 
-  uint32_t raw =
-      g_sys.remote_time_ms + (HAL_GetTick() - g_sys.local_record_tick);
+  // 2. 计算原始推算时间
+  uint32_t raw = g_sys.remote_time_ms + (now_tick - g_sys.local_record_tick);
 
-  if (s_smooth == 0) {
-    s_smooth = raw;
+  if (s_smooth_ms == 0) {
+    s_smooth_ms = raw;
+    s_smooth_sub_ms = 0;
     g_play_time_ms = raw;
     return;
   }
 
 #define SEEK_THRESHOLD_MS 300
 
-  if (raw > s_smooth) {
-    uint32_t delta = raw - s_smooth;
-    if (delta > SEEK_THRESHOLD_MS) {
-      s_smooth = raw;
-    } else {
-      uint32_t step = (delta + 4) / 8;
-      if (step < 1)
-        step = 1;
-      if (step > delta)
-        step = delta;
-      s_smooth += step;
-    }
+  // 3. 计算时间差 error
+  int32_t error = (int32_t)raw - (int32_t)s_smooth_ms;
+
+  // 4. 大跨步拖动进度条 (Seek)
+  if (error > SEEK_THRESHOLD_MS || error < -SEEK_THRESHOLD_MS) {
+    s_smooth_ms = raw;
+    s_smooth_sub_ms = 0;
   } else {
-    uint32_t delta = s_smooth - raw;
-    if (delta > SEEK_THRESHOLD_MS) {
-      s_smooth = raw;
-    } else {
-      uint32_t step = (delta + 4) / 8;
-      if (step < 1)
-        step = 1;
-      if (step > delta)
-        step = delta;
-      s_smooth -= step;
-    }
+    // 5. 纯整数 PID 速度微调
+    // 基准速度 ratio = 1000 (代表 1.000x)
+    // Kp = 2，即每落后 1ms，速度提升 2/1000 = 0.2%
+    int32_t speed_ratio = 1000 + (error * 2);
+
+    // 限制微调上限为 0.900x ~ 1.100x (900 ~ 1100)
+    // 130FPS 下肉眼对 ±10% 的速度微调绝对无法感知，但 1 秒内能轻松抹平 100ms
+    // 的抖动！
+    if (speed_ratio > 1100)
+      speed_ratio = 1100;
+    if (speed_ratio < 900)
+      speed_ratio = 900;
+
+    // 6. 高精度整数累加
+    // 实际增加的微毫秒 = dt * speed_ratio
+    // 比如 dt=8ms, speed_ratio=1020, 增加 8160 (即 8.16ms)
+    uint32_t total_sub = s_smooth_sub_ms + (dt * (uint32_t)speed_ratio);
+
+    s_smooth_ms += total_sub / 1000;    // 进位到整数毫秒
+    s_smooth_sub_ms = total_sub % 1000; // 留存小数微秒
   }
 
 #undef SEEK_THRESHOLD_MS
 
-  g_play_time_ms = s_smooth;
+  g_play_time_ms = s_smooth_ms;
 }
 
 /**

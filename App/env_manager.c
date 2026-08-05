@@ -239,7 +239,7 @@ void Env_Manager_SetFormat(TimeFormat_t format) {
   _Env_Refine_Time(&cur);
 }
 
-void RTC_OnTimeSyncReceived(uint8_t *payload, uint8_t len) {
+void RTC_OnTimeSyncReceived(uint8_t *payload, uint16_t len) {
   if (len < 7)
     return;
   for (int i = 0; i < 7; i++) {
@@ -248,7 +248,7 @@ void RTC_OnTimeSyncReceived(uint8_t *payload, uint8_t len) {
   g_sys.rtc_dirty = 1;
 }
 
-void Env_OnTemperatureReceived(uint8_t *payload, uint8_t len) {
+void Env_OnTemperatureReceived(uint8_t *payload, uint16_t len) {
   if (len < 2)
     return;
   int t_int = (int8_t)payload[0];
@@ -259,7 +259,7 @@ void Env_OnTemperatureReceived(uint8_t *payload, uint8_t len) {
   last_temp_update_tick = HAL_GetTick();
 }
 
-void Env_OnHumidityReceived(uint8_t *payload, uint8_t len) {
+void Env_OnHumidityReceived(uint8_t *payload, uint16_t len) {
   if (len < 2)
     return;
   int h_int = payload[0];

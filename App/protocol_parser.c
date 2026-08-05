@@ -9,7 +9,8 @@
 typedef enum {
   ST_IDLE = 0,
   ST_CMD,
-  ST_LEN,
+  ST_LEN_H,
+  ST_LEN_L,
   ST_PAYLOAD,
   ST_CHECK,
   ST_ERROR
@@ -17,7 +18,7 @@ typedef enum {
 
 static ParseState current_state = ST_IDLE;
 static uint8_t calc_checksum = 0;
-static uint8_t payload_cnt = 0;
+static uint16_t payload_cnt = 0;
 
 void Protocol_Init(void) {
   current_state = ST_IDLE;
@@ -30,7 +31,7 @@ uint8_t Protocol_FeedByte(uint8_t byte, ProtocolPacket *out_pkt) {
   if (current_state == ST_ERROR) {
     if (byte == 0xAA) {
       current_state = ST_CMD;
-      calc_checksum = 0;
+      calc_checksum = 0xAA; // 全帧异或：帧头计入
     }
     return 0;
   }
@@ -39,24 +40,32 @@ uint8_t Protocol_FeedByte(uint8_t byte, ProtocolPacket *out_pkt) {
   case ST_IDLE:
     if (byte == 0xAA) {
       current_state = ST_CMD;
-      calc_checksum = 0;
+      calc_checksum = 0xAA; // 全帧异或：帧头计入
     }
     break;
 
   case ST_CMD:
     out_pkt->cmd = byte;
-    current_state = ST_LEN;
+    calc_checksum ^= byte; // 全帧异或：Cmd 计入
+    current_state = ST_LEN_H;
     break;
 
-  case ST_LEN:
+  case ST_LEN_H:
+    out_pkt->len = (uint16_t)byte << 8;
+    calc_checksum ^= byte; // 全帧异或：LenH 计入
+    current_state = ST_LEN_L;
+    break;
+
+  case ST_LEN_L:
+    out_pkt->len |= byte;
+    calc_checksum ^= byte; // 全帧异或：LenL 计入
     // 长度超限 → 错误态，防止写爆 payload
-    if (byte > MAX_PAYLOAD_SIZE) {
+    if (out_pkt->len > MAX_PAYLOAD_SIZE) {
       current_state = ST_ERROR;
       return 0;
     }
-    out_pkt->len = byte;
     payload_cnt = 0;
-    current_state = (byte == 0) ? ST_CHECK : ST_PAYLOAD;
+    current_state = (out_pkt->len == 0) ? ST_CHECK : ST_PAYLOAD;
     break;
 
   case ST_PAYLOAD:

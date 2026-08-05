@@ -33,10 +33,10 @@ void Env_Manager_SetFormat(TimeFormat_t format);
 void Env_Manager_ShowDateTime(void);
 
 // 串口对时分发目标
-void RTC_OnTimeSyncReceived(uint8_t *payload, uint8_t len);
+void RTC_OnTimeSyncReceived(uint8_t *payload, uint16_t len);
 
 // 环境协议分发目标
-void Env_OnTemperatureReceived(uint8_t *payload, uint8_t len);
-void Env_OnHumidityReceived(uint8_t *payload, uint8_t len);
+void Env_OnTemperatureReceived(uint8_t *payload, uint16_t len);
+void Env_OnHumidityReceived(uint8_t *payload, uint16_t len);
 
 #endif

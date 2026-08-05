@@ -8,7 +8,7 @@
 // 协议包结构体
 typedef struct {
   uint8_t cmd;
-  uint8_t len;
+  uint16_t len; // 2 字节大端长度 (LenH << 8 | LenL)，对齐上位机
   uint8_t payload[MAX_PAYLOAD_SIZE];
   uint8_t checksum;
 } ProtocolPacket;

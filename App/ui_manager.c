@@ -72,78 +72,100 @@ static void _FlushTextToWindow(void) {
 // =============== 平滑播放时间（歌词模式） ===============
 uint32_t g_play_time_ms = 0;
 
+/** PI 平滑后的播放时间 (ms) —— 全局时间轴，UI 切换不清零 */
+static uint32_t s_pi_time = 0;
+/** 上次 PI 计算的墙钟 (ms) */
+static uint32_t s_pi_last_tick = 0;
+
 /**
- * @brief 纯整数微秒级 PID 速度微调 Smoothing
+ * @brief 130FPS 时间轴算法：speed 感知外推 + PI 平滑控推进速率
+ * 每帧在 LyricWM_RenderMgr 入口调用一次。
+ *
+ * 原理：
+ *   0x11 同步包在 Lyric_OnSyncReceived 中已建立锚点
+ *   (base_remote_time / local_send_tick / playback_speed)，此后推算
+ *   阶段完全不依赖 UDP 接收时刻 → 免疫网络延迟抖动。
+ *
+ *   目标值 target = base_remote_time + 墙钟流逝 × speed
+ *   (含变速感知，与 C# 播放器速率同频)。
+ *
+ *   渲染端用 PI 平滑跟踪 target，分三种行为：
+ *   - 正常播放：s_pi_time 以 speed 速率推进，误差用 P 项低通吸收
+ *   - 变速确认：speed 更新 + 锚点重建 → target 拉开差距，
+ *     P 项逐帧收敛（歌词平滑追赶，不瞬移）
+ *   - Seek/暂停恢复：硬跳重建锚点 + playback_speed_changed 事件
+ *     → s_pi_time 直接对齐 base_remote_time（瞬移接管）
+ *
+ * 边界：
+ *   - 未完成首次同步 → 返回 0
+ *   - 暂停 → 冻结在最近已知进度
+ *   - 卡帧/异常间隔 → elapsed 钳制，防瞬移
  */
+// ===== 渲染端 PI 平滑调参 =====
+// P 项系数 (Q16, ≈2.3%)：调大→变速追赶快(输出偏抖)；调小→稳(追赶滞后)
+#define PI_KP_Q16 1536
+// 单帧 P 项补偿上限 (ms)：防异常误差(如一次大 Seek)导致歌词瞬移
+#define PI_COMP_MAX_MS 40
+// 单帧墙钟上限 (ms)：防长时间卡帧后恢复时的瞬移
+#define PI_FRAME_MAX_MS 100
+
 static void _UpdateSmoothTime(void) {
-  static uint32_t s_smooth_ms = 0;
-  static uint32_t s_smooth_sub_ms = 0; // 毫秒的小数部分 (范围 0~999，即微秒)
-  static uint32_t s_last_tick = 0;
-
   uint32_t now_tick = HAL_GetTick();
-  if (s_last_tick == 0) {
-    s_last_tick = now_tick;
-  }
-  uint32_t dt = now_tick - s_last_tick; // 130FPS 下 dt 通常为 7ms 或 8ms
-  s_last_tick = now_tick;
 
-  // 1. 边界拦截
-  if (g_sys.local_record_tick == 0) {
+  // 1. 边界拦截：未同步（切歌后 ClearPool 清 clock_synced，自动回到此路径）
+  if (!g_sys.clock_synced) {
     g_play_time_ms = 0;
+    s_pi_time = 0;
+    s_pi_last_tick = now_tick;
     return;
   }
+
+  // 2. 暂停：冻结在最近已知进度
   if (!g_sys.is_playing) {
-    s_smooth_ms = g_sys.remote_time_ms;
-    s_smooth_sub_ms = 0;
-    g_play_time_ms = g_sys.remote_time_ms;
+    g_play_time_ms = g_sys.base_remote_time;
+    s_pi_time = g_sys.base_remote_time;
+    s_pi_last_tick = now_tick;
     return;
   }
 
-  // 2. 计算原始推算时间
-  uint32_t raw = g_sys.remote_time_ms + (now_tick - g_sys.local_record_tick);
-
-  if (s_smooth_ms == 0) {
-    s_smooth_ms = raw;
-    s_smooth_sub_ms = 0;
-    g_play_time_ms = raw;
-    return;
+  // 3. 变速/Seek 事件：直接对齐新锚点（硬跳接管），重置 PI
+  if (g_sys.playback_speed_changed) {
+    g_sys.playback_speed_changed = 0;
+    s_pi_time = g_sys.base_remote_time;
+    s_pi_last_tick = now_tick;
   }
 
-#define SEEK_THRESHOLD_MS 500
-
-  // 3. 计算时间差 error
-  int32_t error = (int32_t)raw - (int32_t)s_smooth_ms;
-
-  // 4. 大跨步拖动进度条 (Seek)
-  if (error > SEEK_THRESHOLD_MS || error < -SEEK_THRESHOLD_MS) {
-    s_smooth_ms = raw;
-    s_smooth_sub_ms = 0;
-  } else {
-    // 5. 纯整数 PID 速度微调
-    // 基准速度 ratio = 1000 (代表 1.000x)
-    // Kp = 2，即每落后 1ms，速度提升 2/1000 = 0.2%
-    int32_t speed_ratio = 1000 + (error * 2);
-
-    // 限制微调上限为 0.900x ~ 1.100x (900 ~ 1100)
-    // 130FPS 下肉眼对 ±10% 的速度微调绝对无法感知，但 1 秒内能轻松抹平 100ms
-    // 的抖动！
-    if (speed_ratio > 1100)
-      speed_ratio = 1100;
-    if (speed_ratio < 900)
-      speed_ratio = 900;
-
-    // 6. 高精度整数累加
-    // 实际增加的微毫秒 = dt * speed_ratio
-    // 比如 dt=8ms, speed_ratio=1020, 增加 8160 (即 8.16ms)
-    uint32_t total_sub = s_smooth_sub_ms + (dt * (uint32_t)speed_ratio);
-
-    s_smooth_ms += total_sub / 1000;    // 进位到整数毫秒
-    s_smooth_sub_ms = total_sub % 1000; // 留存小数微秒
+  // 4. 目标 = 锚点 + 墙钟流逝 × speed（Q8，含变速感知）
+  uint32_t elapsed = now_tick - s_pi_last_tick;
+  if (elapsed > PI_FRAME_MAX_MS) {
+    elapsed = PI_FRAME_MAX_MS;
+    s_pi_last_tick = now_tick - elapsed; // 平移，避免累积误差
   }
+  uint32_t target =
+      (uint32_t)((int64_t)g_sys.base_remote_time +
+                 (int64_t)((int32_t)now_tick - (int32_t)g_sys.local_send_tick) *
+                     (int32_t)g_sys.playback_speed / (int32_t)256);
 
-#undef SEEK_THRESHOLD_MS
+  // 5. 推进速率 = elapsed × speed（speed 感知，与锚点同步增长）
+  int32_t frame_step =
+      (int32_t)((int64_t)elapsed * g_sys.playback_speed / (int32_t)256);
+  s_pi_time = (uint32_t)((int32_t)s_pi_time + frame_step);
 
-  g_play_time_ms = s_smooth_ms;
+  // 6. P 项误差补偿：低通吸收 target 与 s_pi_time 的偏差
+  int32_t err = (int32_t)target - (int32_t)s_pi_time;
+  int32_t comp = (int32_t)((int64_t)err * PI_KP_Q16 / 65536);
+  if (comp > PI_COMP_MAX_MS)
+    comp = PI_COMP_MAX_MS;
+  if (comp < -PI_COMP_MAX_MS)
+    comp = -PI_COMP_MAX_MS;
+  s_pi_time = (uint32_t)((int32_t)s_pi_time + comp);
+  s_pi_last_tick = now_tick;
+
+  // 7. 封顶总时长
+  if (g_sys.total_ms > 0 && s_pi_time > g_sys.total_ms)
+    g_play_time_ms = g_sys.total_ms;
+  else
+    g_play_time_ms = s_pi_time;
 }
 
 /**

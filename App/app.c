@@ -28,6 +28,9 @@ const char start_info_txt[] = {
     0xAF, 0xD6, 0xD0, 0x2E, 0x2E, 0x2E, 0x00}; // 系统启动中...
 
 void App_Init(void) {
+  LyricService_Init(); // 歌词服务：初始化 g_sys（playback_speed=1.0x 等），
+                       // 否则全局 g_sys 处于 .bss 清零态，变速测速除零
+                       // HardFault
   /* ── 串口初始化（DMA接收 + 空闲中断） ── */
   COM_Init(&huart1);
 

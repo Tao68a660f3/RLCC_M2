@@ -4,9 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SYNC_SEEK_THRESHOLD_MS 500
+#define SYNC_SEEK_THRESHOLD_MS 1000
 #define CLOCK_FILTER_DIV 16
-#define JITTER_MAX_MS 200
+#define JITTER_MAX_MS 100
 #define RETUNE_MARGIN_MS 3
 
 #define SEEK_RATIO_MIN_Q8 64   // 0.25x
@@ -367,7 +367,7 @@ static void _Sync_FineTune(int32_t obs, uint32_t remote_time_ms,
     return;
 
   // 最小延迟锚点追踪：观测到更干净路径时前移锚点
-  if (obs < g_sys.min_obs_latency_ms - RETUNE_MARGIN_MS) {
+  if (obs > g_sys.min_obs_latency_ms + RETUNE_MARGIN_MS) {
     // new_offset = -(offset_true + d_new)，只可能更准，绝不回跳
     g_sys.clock_offset_ms += (g_sys.min_obs_latency_ms - obs);
     g_sys.min_obs_latency_ms = obs;

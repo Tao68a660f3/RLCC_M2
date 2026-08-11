@@ -11,7 +11,7 @@
 
 #define SEEK_RATIO_MIN_Q8 64   // 0.25x
 #define SEEK_RATIO_MAX_Q8 1024 // 4.0x
-#define SPEED_WINDOW_PACKETS 16
+#define SPEED_WINDOW_PACKETS 8
 #define SPEED_CHANGE_PERCENT 15
 
 #define SPEED_NORMAL_Q8 256 // 1.0x
@@ -49,10 +49,11 @@ void LyricService_ClearPool(void) {
   g_sys.base_remote_time = 0;
   g_sys.base_remote_tick = 0;
   g_sys.local_send_tick = 0;
-  g_sys.min_obs_latency_ms = 0;
   g_sys.playback_speed = SPEED_NORMAL_Q8; // 新歌按 1.0x 起步
   g_sys.playback_speed_changed = 0;
   g_sys.clock_synced = 0;
+  g_sys.best_obs_valid = 0; // 每首歌重新建立最佳网络观测
+                            // (best_obs_latency_ms 旧值残留但不参与判断)
 
   // 重置变速滑窗与增量跟踪
   s_win_pkt = 0;
@@ -204,14 +205,16 @@ void Lyric_OnMetadataReceived(uint8_t *payload, uint16_t len) {
 // 0x11 时间同步：内部辅助函数（_Sync_* 均为纯搬移，行为不变）
 // =====================================================================
 
-// 重建时间轴锚点 + 重置最小观察延迟 (4 处公共操作)
+// 重建时间轴锚点 (3 处公共操作)
+// 注意：不维护 best_obs_latency_ms —— 该值只应保存"运行过程中见过的最佳
+// 观测"，普通 Rebase(暂停/变速/Seek/外推硬跳) 绝对不允许无条件覆盖它；
+// 首次建立与更优更新分别由 _Sync_HandleFirstSync / _Sync_FineTune 负责。
 static void _Sync_Rebase(int32_t obs, uint32_t remote_time_ms,
                          uint32_t upstream_tick_ms, uint32_t local_rx) {
   g_sys.clock_offset_ms = obs;
   g_sys.base_remote_time = remote_time_ms;
   g_sys.base_remote_tick = upstream_tick_ms;
   g_sys.local_send_tick = local_rx;
-  g_sys.min_obs_latency_ms = obs;
 }
 
 // 重置变速滑窗计数（不含 s_has_prev / s_last_*）
@@ -220,11 +223,15 @@ static void _Sync_ResetTracking(void) {
   s_speed_confirm = 0;
 }
 
-// 首次同步：建立锚点 + 通知渲染端硬跳对齐 + 丢弃旧参考
+// 首次同步：建立锚点 + 建立首次最佳观测 + 通知渲染端硬跳对齐 + 丢弃旧参考
 static void _Sync_HandleFirstSync(int32_t obs, uint32_t remote_time_ms,
                                   uint32_t upstream_tick_ms,
                                   uint32_t local_rx) {
   _Sync_Rebase(obs, remote_time_ms, upstream_tick_ms, local_rx);
+  // 首次有效观测：建立历史最佳观测 (与 clock_synced 概念独立，
+  // 但可在此同一次处理中一并建立)
+  g_sys.best_obs_latency_ms = obs;
+  g_sys.best_obs_valid = 1;
   g_sys.clock_synced = 1;
   // 通知渲染端：下帧 s_pi_time 直接硬跳对齐新锚点，
   // 否则 s_pi_time 从 0 起步仅靠 P 项(≤40ms/帧)追赶，
@@ -353,7 +360,7 @@ static bool _Sync_CheckExtrapolation(int32_t obs, uint32_t remote_time_ms,
   return false;
 }
 
-// 微调链：jitter 过滤 / min_obs 锚点追踪 / 晶振漂移低通
+// 微调链：jitter 过滤 / best_obs 锚点追踪 / 晶振漂移低通
 static void _Sync_FineTune(int32_t obs, uint32_t remote_time_ms,
                            uint32_t upstream_tick_ms, uint32_t local_rx) {
   int32_t cs_delta =
@@ -366,11 +373,16 @@ static void _Sync_FineTune(int32_t obs, uint32_t remote_time_ms,
   if (jitter > JITTER_MAX_MS || jitter < -JITTER_MAX_MS)
     return;
 
-  // 最小延迟锚点追踪：观测到更干净路径时前移锚点
-  if (obs > g_sys.min_obs_latency_ms + RETUNE_MARGIN_MS) {
+  // 最佳观测锚点追踪：观测到更干净路径时前移锚点
+  // 首次有效观测建立初值（正常流程已在 _Sync_HandleFirstSync 建立，
+  // 此处为防御兜底，仅建立状态，不 return，继续走普通漂移微调）
+  if (!g_sys.best_obs_valid) {
+    g_sys.best_obs_latency_ms = obs;
+    g_sys.best_obs_valid = 1;
+  } else if (obs > g_sys.best_obs_latency_ms + RETUNE_MARGIN_MS) {
     // new_offset = -(offset_true + d_new)，只可能更准，绝不回跳
-    g_sys.clock_offset_ms += (g_sys.min_obs_latency_ms - obs);
-    g_sys.min_obs_latency_ms = obs;
+    g_sys.clock_offset_ms += (g_sys.best_obs_latency_ms - obs);
+    g_sys.best_obs_latency_ms = obs;
     g_sys.base_remote_time = remote_time_ms;
     g_sys.base_remote_tick = upstream_tick_ms;
     g_sys.local_send_tick = local_rx;
@@ -384,7 +396,7 @@ static void _Sync_FineTune(int32_t obs, uint32_t remote_time_ms,
 }
 
 /**
- * @brief 0x11: 时间同步（锚点 + 最小延迟追踪 + 抖动过滤 + 变速/Seek 检测）
+ * @brief 0x11: 时间同步（锚点 + 最佳观测追踪 + 抖动过滤 + 变速/Seek 检测）
  *
  * 包格式: [0]=is_playing [1..4]=remote_time_ms [5..8]=total_ms
  *         [9..12]=upstream_tick_ms (C# Environment.TickCount32)
@@ -414,7 +426,7 @@ void Lyric_OnSyncReceived(uint8_t *payload, uint16_t len) {
   g_sys.upstream_tick_ms = upstream_tick_ms;
 
   // 可观测延迟 = C#时钟 - STM32时钟 + 单向网络延迟
-  // (offset_true 为常数，取最小值等价于追踪真实延迟下界)
+  // (offset_true 为常数，取最大值等价于追踪真实延迟下界)
   int32_t obs = (int32_t)upstream_tick_ms - (int32_t)local_rx;
 
   // ===== 0. 首次同步：建立锚点，不做任何增量检测 =====
@@ -444,7 +456,7 @@ void Lyric_OnSyncReceived(uint8_t *payload, uint16_t len) {
   if (_Sync_CheckExtrapolation(obs, remote_time_ms, upstream_tick_ms, local_rx))
     return;
 
-  // ===== 4. 微调链：jitter 过滤 / min_obs / 漂移低通 =====
+  // ===== 4. 微调链：jitter 过滤 / best_obs / 漂移低通 =====
   _Sync_FineTune(obs, remote_time_ms, upstream_tick_ms, local_rx);
 }
 

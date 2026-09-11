@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /* ── FLUSH 分频：完整扫 N 帧后才真正 swap（防撕裂） ── */
-#define FLUSH_DIV 1
+#define FLUSH_DIV 4
 
 /* ── 屏幕规格 ────────────────────────────────────────── */
 #define LED_WIDTH 160

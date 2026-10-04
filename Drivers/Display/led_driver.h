@@ -18,9 +18,6 @@
 extern uint8_t frame_buffer[LED_BUF_COUNT][LED_SCAN_ROWS][BYTES_PER_ROW];
 extern volatile uint8_t write_idx;
 
-/* ── 单色颜色枚举 ──────────────────────────────────── */
-typedef enum { COLOR_OFF = 0, COLOR_ON = 1 } LED_Color;
-
 /* ── ISR 回调：由 stm32f1xx_it.c 调用 ──────────────── */
 void LED_TIM2_IRQHandler(void);
 

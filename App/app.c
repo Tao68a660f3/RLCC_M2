@@ -9,7 +9,6 @@
 #include "env_manager.h"
 #include "font_config.h"
 #include "lcd_driver.h"
-#include "led_display.h"
 #include "led_driver.h"
 #include "lyric_service.h"
 #include "protocol_parser.h"

@@ -63,7 +63,11 @@ static void _FlushTextToWindow(void) {
   if (win->canvas.width > win->w) {
     win->scroll_divider = 1;
     win->scroll_step = -1;
-    Window_SetAlignment(0, ALIGN_LEFT);
+    if (g_curr_sys_mode == SYS_MODE_PROTOCOL_MODE) {
+      Window_SetAlignment(0, ALIGN_LEFT);
+    } else {
+      window_list[0].x = window_list[0].w;
+    }
   } else {
     win->scroll_divider = 0;
     Window_SetAlignment(0, ALIGN_CENTER);
@@ -104,8 +108,8 @@ static LyricArea *_FindCurrentLyric(uint32_t now) {
   uint32_t last_start = 0;
   uint8_t has_last = 0;
 
-  // 定位 a（最后一个 start <= now 的有效行）与 b（第一个 start > now 的有效行）；
-  // 占位行跳过，同组只锚组首（排序保证组首是 0x15/0x12 原文行）
+  // 定位 a（最后一个 start <= now 的有效行）与 b（第一个 start > now
+  // 的有效行）； 占位行跳过，同组只锚组首（排序保证组首是 0x15/0x12 原文行）
   for (int i = 0; i < (int)g_sys.active_count; i++) {
     LyricArea *cur = g_sys.sorted_lyrics[i];
 
@@ -139,7 +143,8 @@ static LyricArea *_FindCurrentLyric(uint32_t now) {
       anchor = a_idx; // 保持最后一句
 #if ALLOW_TRAILING_PLACEHOLDER
       int nxt = a_idx + 1;
-      if (nxt < (int)g_sys.active_count && g_sys.sorted_lyrics[nxt]->cmd == 0x13)
+      if (nxt < (int)g_sys.active_count &&
+          g_sys.sorted_lyrics[nxt]->cmd == 0x13)
         nxt++; // 跳过紧跟的翻译行
       if (nxt < (int)g_sys.active_count)
         anchor = nxt; // 末尾占位（显示空）

@@ -63,7 +63,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
     # Display 层驱动
     Drivers/Display/led_driver.c
-    Drivers/Display/led_display.c
     Drivers/Display/window_manager.c
     Drivers/Display/canvas_renderer.c
     Drivers/Display/mem_pool.c

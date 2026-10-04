@@ -79,6 +79,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/lyric_service.c
     App/protocol_parser.c
     App/ui_manager.c
+    App/sync_algorithm.c
 )
 
 # 2. 包含路径

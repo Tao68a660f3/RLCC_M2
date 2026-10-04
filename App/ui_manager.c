@@ -4,6 +4,7 @@
 #include "led_driver.h"
 #include "lyric_service.h"
 #include "mem_pool.h"
+#include "sync_algorithm.h"
 #include "window_manager.h"
 #include <stdint.h>
 #include <string.h>
@@ -69,135 +70,91 @@ static void _FlushTextToWindow(void) {
   }
 }
 
-// =============== 平滑播放时间（歌词模式） ===============
+// =============== 播放时间（歌词模式） ===============
+// 时间轴由 sync_algorithm 统一提供（0x11 → Sync_OnPacketAt），此处只采样
 uint32_t g_play_time_ms = 0;
 
-/** PI 平滑后的播放时间 (ms) —— 全局时间轴，UI 切换不清零 */
-static uint32_t s_pi_time = 0;
-/** 上次 PI 计算的墙钟 (ms) */
-static uint32_t s_pi_last_tick = 0;
-
-/**
- * @brief 130FPS 时间轴算法：speed 感知外推 + PI 平滑控推进速率
- * 每帧在 LyricWM_RenderMgr 入口调用一次。
- *
- * 原理：
- *   0x11 同步包在 Lyric_OnSyncReceived 中已建立锚点
- *   (base_remote_time / local_send_tick / playback_speed)，此后推算
- *   阶段完全不依赖 UDP 接收时刻 → 免疫网络延迟抖动。
- *
- *   目标值 target = base_remote_time + 墙钟流逝 × speed
- *   (含变速感知，与 C# 播放器速率同频)。
- *
- *   渲染端用 PI 平滑跟踪 target，分三种行为：
- *   - 正常播放：s_pi_time 以 speed 速率推进，误差用 P 项低通吸收
- *   - 变速确认：speed 更新 + 锚点重建 → target 拉开差距，
- *     P 项逐帧收敛（歌词平滑追赶，不瞬移）
- *   - Seek/暂停恢复：硬跳重建锚点 + playback_speed_changed 事件
- *     → s_pi_time 直接对齐 base_remote_time（瞬移接管）
- *
- * 边界：
- *   - 未完成首次同步 → 返回 0
- *   - 暂停 → 冻结在最近已知进度
- *   - 卡帧/异常间隔 → elapsed 钳制，防瞬移
- */
-// ===== 渲染端 PI 平滑调参 =====
-// P 项系数 (Q16, ≈2.3%)：调大→变速追赶快(输出偏抖)；调小→稳(追赶滞后)
-#define PI_KP_Q16 3200
-// 单帧 P 项补偿上限 (ms)：防异常误差(如一次大 Seek)导致歌词瞬移
-#define PI_COMP_MAX_MS 40
-// 单帧墙钟上限 (ms)：防长时间卡帧后恢复时的瞬移
-#define PI_FRAME_MAX_MS 100
-
-static void _UpdateSmoothTime(void) {
-  uint32_t now_tick = HAL_GetTick();
-
-  // 1. 边界拦截：未同步（切歌后 ClearPool 清 clock_synced，自动回到此路径）
-  if (!g_sys.clock_synced) {
-    g_play_time_ms = 0;
-    s_pi_time = 0;
-    s_pi_last_tick = now_tick;
-    return;
-  }
-
-  // 2. 暂停：冻结在最近已知进度
-  if (!g_sys.is_playing) {
-    g_play_time_ms = g_sys.base_remote_time;
-    s_pi_time = g_sys.base_remote_time;
-    s_pi_last_tick = now_tick;
-    return;
-  }
-
-  // 3. 变速/Seek 事件：直接对齐新锚点（硬跳接管），重置 PI
-  if (g_sys.playback_speed_changed) {
-    g_sys.playback_speed_changed = 0;
-    s_pi_time = g_sys.base_remote_time;
-    s_pi_last_tick = now_tick;
-  }
-
-  // 4. 目标 = 锚点 + 墙钟流逝 × speed（Q8，含变速感知）
-  uint32_t elapsed = now_tick - s_pi_last_tick;
-  if (elapsed > PI_FRAME_MAX_MS) {
-    elapsed = PI_FRAME_MAX_MS;
-    s_pi_last_tick = now_tick - elapsed; // 平移，避免累积误差
-  }
-  uint32_t target =
-      (uint32_t)((int64_t)g_sys.base_remote_time +
-                 (int64_t)((int32_t)now_tick - (int32_t)g_sys.local_send_tick) *
-                     (int32_t)g_sys.playback_speed / (int32_t)256);
-
-  // 5. 推进速率 = elapsed × speed（speed 感知，与锚点同步增长）
-  int32_t frame_step =
-      (int32_t)((int64_t)elapsed * g_sys.playback_speed / (int32_t)256);
-  s_pi_time = (uint32_t)((int32_t)s_pi_time + frame_step);
-
-  // 6. P 项误差补偿：低通吸收 target 与 s_pi_time 的偏差
-  int32_t err = (int32_t)target - (int32_t)s_pi_time;
-  int32_t comp = (int32_t)((int64_t)err * PI_KP_Q16 / 65536);
-  if (comp > PI_COMP_MAX_MS)
-    comp = PI_COMP_MAX_MS;
-  if (comp < -PI_COMP_MAX_MS)
-    comp = -PI_COMP_MAX_MS;
-  s_pi_time = (uint32_t)((int32_t)s_pi_time + comp);
-  s_pi_last_tick = now_tick;
-
-  // 7. 封顶总时长
-  if (g_sys.total_ms > 0 && s_pi_time > g_sys.total_ms)
-    g_play_time_ms = g_sys.total_ms;
-  else
-    g_play_time_ms = s_pi_time;
-}
+// ============ 配置 ============
+// 1 = 允许该位置的占位行作为显示起点（显示空）
+#define ALLOW_LEADING_PLACEHOLDER 1  // 开头占位
+#define ALLOW_TRAILING_PLACEHOLDER 0 // 末尾占位（0 = 保持最后一句）
 
 /**
  * @brief 在 sorted_lyrics 中查找当前时间对应的歌词行
- * @return 指向 LyricArea 的指针，未找到返回 NULL
+ *
+ * 单次扫描定位：
+ *   a = 最后一个 start <= now 的有效行（组首）
+ *   b = 第一个 start > now 的有效行
+ * 显示策略：
+ *   - a 仍在播放区间内        → 显示 a
+ *   - a 已过期、b 距 now≤1.5s → 提前切到 b
+ *   - a 已过期、已无下一行     → 末尾处理（见 ALLOW_TRAILING_PLACEHOLDER）
+ *   - now 在第一句之前         → 开头处理（见 ALLOW_LEADING_PLACEHOLDER）
+ * 同组（start 相同）只锚组首：_Lyric_UpdateSortedArray 的排序保证
+ * 组首为 0x15/0x12 原文行，不会锚到翻译行。
+ *
+ * @return 指向 LyricArea 的指针；池空返回 NULL
  */
 static LyricArea *_FindCurrentLyric(uint32_t now) {
-  for (uint32_t i = 0; i < g_sys.active_count; i++) {
-    LyricArea *a = g_sys.sorted_lyrics[i];
-    uint32_t a_end = a->start_time_ms + a->duration;
+  if (g_sys.active_count == 0)
+    return NULL;
 
-    // 情形A：当前时间正在本行区间内
-    if (now >= a->start_time_ms && now <= a_end)
-      return a;
+  int a_idx = -1;
+  int b_idx = -1;
+  uint32_t last_start = 0;
+  uint8_t has_last = 0;
 
-    // 情形B：尚未到达本行 → 退 1 行保持显示
-    if (now < a->start_time_ms)
-      return (i > 0) ? g_sys.sorted_lyrics[i - 1] : g_sys.sorted_lyrics[0];
+  // 定位 a（最后一个 start <= now 的有效行）与 b（第一个 start > now 的有效行）；
+  // 占位行跳过，同组只锚组首（排序保证组首是 0x15/0x12 原文行）
+  for (int i = 0; i < (int)g_sys.active_count; i++) {
+    LyricArea *cur = g_sys.sorted_lyrics[i];
 
-    // 情形C：本行已过期 → 检查下一行是否需要提前切入
-    if ((i + 1) < g_sys.active_count) {
-      LyricArea *next = g_sys.sorted_lyrics[i + 1];
-      // 跳过 cmd=0x13（间奏行）
-      if (next->cmd == 0x13 && (i + 2) < g_sys.active_count)
-        next = g_sys.sorted_lyrics[i + 2];
-      // 距下一行开始不到 1.5s → 提前切换
-      if ((now + 1500) >= next->start_time_ms &&
-          next->start_time_ms > (a->start_time_ms + a->duration))
-        return next;
+    if (cur->start_time_ms == 0 && cur->duration == 0)
+      continue; // 占位行
+
+    if (cur->start_time_ms <= now) {
+      if (has_last && cur->start_time_ms == last_start)
+        continue; // 同组，只锚组首
+      a_idx = i;
+      last_start = cur->start_time_ms;
+      has_last = 1;
+    } else {
+      b_idx = i;
+      break;
     }
   }
-  return g_sys.sorted_lyrics[0];
+
+  int anchor;
+  if (a_idx >= 0) {
+    LyricArea *a = g_sys.sorted_lyrics[a_idx];
+    // 减法判据：防 start_time_ms + duration 回绕
+    if ((now - a->start_time_ms) < a->duration) {
+      anchor = a_idx; // a 仍在有效区间
+    } else if (b_idx >= 0) {
+      // a 已过期：b 快到了提前切，否则保留 a 过渡
+      uint32_t dt = g_sys.sorted_lyrics[b_idx]->start_time_ms - now;
+      anchor = (dt <= 1500u) ? b_idx : a_idx;
+    } else {
+      // 全过期：末尾处理
+      anchor = a_idx; // 保持最后一句
+#if ALLOW_TRAILING_PLACEHOLDER
+      int nxt = a_idx + 1;
+      if (nxt < (int)g_sys.active_count && g_sys.sorted_lyrics[nxt]->cmd == 0x13)
+        nxt++; // 跳过紧跟的翻译行
+      if (nxt < (int)g_sys.active_count)
+        anchor = nxt; // 末尾占位（显示空）
+#endif
+    }
+  } else {
+    // a 不存在：now 在第一句之前 → 开头处理
+#if ALLOW_LEADING_PLACEHOLDER
+    anchor = (b_idx > 0) ? (b_idx - 1) : 0; // 最后一个开头占位 / 第一句
+#else
+    anchor = (b_idx >= 0) ? b_idx : 0; // 第一句按"下一行"
+#endif
+  }
+
+  return g_sys.sorted_lyrics[anchor];
 }
 
 //
@@ -354,7 +311,7 @@ void UI_Manager_Tick(void) {
 
   // ---- 歌词模式：更新平滑时间 + 查找当前歌词 ----
   if (g_curr_sys_mode == SYS_MODE_PROTOCOL_MODE) {
-    _UpdateSmoothTime();
+    g_play_time_ms = Sync_GetTime();
 
     LyricArea *curr = _FindCurrentLyric(g_play_time_ms);
     if (curr) {

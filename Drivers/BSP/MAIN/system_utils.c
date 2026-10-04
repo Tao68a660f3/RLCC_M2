@@ -3,19 +3,19 @@
 /* --- 初始化 DWT (兼容 F103) --- */
 void DWT_Init(void) {
   /* 使能 Trace 调试模块 */
-  if (!(CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk)) {
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-  }
+  // if (!(CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk)) {
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  // }
 
   /* 重置 CYCCNT 计数器 */
   DWT->CYCCNT = 0;
 
   /* 开启 CYCCNT 计数器 (bit 0) */
-#ifdef DWT_CTRL_CYCCNTENA_Msk
+  // #ifdef DWT_CTRL_CYCCNTENA_Msk
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-#else
-  DWT->CTRL |= (1UL << 0); // 兼容某些 CMSIS 头文件未定义该宏的情况
-#endif
+  // #else
+  //   DWT->CTRL |= (1UL << 0); // 兼容某些 CMSIS 头文件未定义该宏的情况
+  // #endif
 }
 
 /* --- 精准微秒延迟 --- */

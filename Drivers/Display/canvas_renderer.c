@@ -68,6 +68,50 @@ void Canvas_ClearCanvas(CanvasHandle *h) {
 }
 
 /**
+ * @brief 整个画布按位取反（反白/反色）
+ *
+ * 平面选择：
+ *   - 单平面 (CANVAS_R / CANVAS_G)：只处理 r_ptr ?: g_ptr（单色平台常态）；
+ *   - CANVAS_RG 双平面：两平面各自独立取反；
+ *   - CANVAS_Y：r_ptr == g_ptr，同一平面只取反一次。
+ *
+ * 行尾 padding 必须清回 0：画布宽 w 时每行占 ceil(w/8) 字节，最后一个字节里
+ * 超出 w 的低位是 padding。而 Window_BlitToScreen 的块搬运是"按屏幕字节对齐"
+ * 整字节读取画布（见 window_manager.c 中 pair/bits 的拼装），padding 位一旦
+ * 被置 1 就会被当作有效像素点亮，表现为每行末尾多出亮点。
+ * Pool_AllocCanvas 的初值即"padding = 0"，此处保持一致。
+ */
+void Canvas_InvertCanvas(CanvasHandle *h) {
+  if (!h || h->handle == -1)
+    return;
+  if (h->width == 0 || h->height == 0)
+    return;
+
+  uint16_t bw = (uint16_t)((h->width + 7) / 8); // 每行字节数
+  uint32_t bytes = (uint32_t)bw * h->height;
+  uint8_t rem = (uint8_t)(h->width & 7);
+  /* 有效位掩码：rem==0 整字节有效；否则只保留高 rem 位（MSB-first） */
+  uint8_t tail_keep = (rem == 0) ? 0xFFu : (uint8_t)(0xFFu << (8 - rem));
+
+  uint8_t *planes[2] = {h->r_ptr, h->g_ptr};
+  for (int p = 0; p < 2; p++) {
+    uint8_t *buf = planes[p];
+    if (buf == NULL)
+      continue;
+    if (p == 1 && h->g_ptr == h->r_ptr)
+      continue; // CANVAS_Y：同一平面只处理一次
+
+    for (uint32_t i = 0; i < bytes; i++)
+      buf[i] = (uint8_t)~buf[i];
+
+    if (tail_keep != 0xFFu) {
+      for (uint16_t y = 0; y < h->height; y++)
+        buf[(uint32_t)y * bw + (bw - 1)] &= tail_keep;
+    }
+  }
+}
+
+/**
  * @brief 内部函数：处理笔尖换行逻辑 (供测量和绘制通用)
  */
 static void _Canvas_HandleWrap(DrawContext *ctx, uint16_t next_w) {

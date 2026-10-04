@@ -46,17 +46,18 @@ void Window_SetAlignment(uint8_t idx, WinAlign align);
 void WindowManager_Single_Process(uint8_t i);
 void WindowManager_Process(void);
 
-// 块搬运渲染函数
-// h_px==0xFFFF: 静态文本模式; 否则歌词着色模式
-// off_x/off_y: 额外偏移叠加在 win->x/y 上（歌词场景传 cfg->offset_x/y，其他传
-// 0）
-void Window_BlitToScreen(LED_Window *win, uint16_t h_px, uint8_t color_high,
-                         uint8_t color_base, int16_t off_x, int16_t off_y);
+// 块搬运渲染函数（单色屏：只做块搬运，不做颜色/高亮分色）
+// off_x/off_y: 额外偏移叠加在 win->x/y 上（其他用途传 0）
+void Window_BlitToScreen(LED_Window *win, int16_t off_x, int16_t off_y);
 
 // 填充文本到窗口画布（Flash 字库适配器版）
 // 参数含义同 UI_UpdateTextEx，流程：测量→分配→绘制→原子切换
 // valign: 竖直对齐（顶部/居中/底部），基于窗口高度与画布高度计算 y_offset
-void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
-                     CanvasMode mode, Valign valign);
+//
+// 单色平台（M2 / M2_Plus）：画布形态（单平面 CANVAS_R + 写入色 C_RED）由
+// window_manager.c 内部固定，应用层不再暴露 CanvasColor / CanvasMode ——
+// 从类型上根除"颜色位 ↔ CANVAS_MODE 错配 → 静默画出空白"这类问题。
+// 需要反白/反色显示时，对画布调用 Canvas_InvertCanvas()（canvas_renderer.h）。
+void Window_FillText(uint8_t win_idx, const char *str, Valign valign);
 
 #endif

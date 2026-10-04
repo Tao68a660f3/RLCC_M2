@@ -41,7 +41,6 @@ typedef struct {
 } MemBlock;
 
 /* 基础 API */
-CanvasMode ColorToCanvasMode(CanvasColor color);
 void Pool_Init(void);
 CanvasHandle Pool_AllocCanvas(uint16_t w, uint16_t h, int16_t old_handle,
                               CanvasMode mode);

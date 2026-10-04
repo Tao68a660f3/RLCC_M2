@@ -165,19 +165,26 @@ void Window_SetAlignment(uint8_t idx, WinAlign align) {
 // 窗口填充文本（Flash 字库适配器版）
 // ============================================================================
 
+/* 单色平台固定的画布形态（全项目唯一设置点）：
+ *   - 单平面 CANVAS_R  → 写入平面 == 上屏读取平面 (r_ptr ?: g_ptr)
+ *   - 置位写入色 C_RED → 字形像素写 1 (亮)
+ * 应用层不再接触 CanvasColor / CanvasMode，从根本上消除"颜色位与
+ * CANVAS_MODE 错配 → 静默画出空白"这类问题。 */
+#define WINDOW_CANVAS_MODE CANVAS_R
+#define WINDOW_CANVAS_COLOR C_RED
+
 /**
  * @brief 使用 Flash 字库适配器填充文本到指定窗口的画布
  * @param win_idx 窗口索引
  * @param str     待渲染的字符串 (混合 ASC + GBK)
- * @param color   前景色 (单色驱动中忽略)
- * @param mode    画布内存模式 (CANVAS_R 单色)
  * @param valign  竖直对齐方式 (顶部/居中/底部)
  *
  * 流程：测量字符串尺寸 → Pool_AllocCanvas (带复用) → 绘制 → 原子切换窗口引用
  * 绘制完后根据 valign 和窗口高度计算 y_offset 实现竖直对齐
+ *
+ * 需要反白/反色显示时，对画布调用 Canvas_InvertCanvas()（canvas_renderer.h）。
  */
-void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
-                     CanvasMode mode, Valign valign) {
+void Window_FillText(uint8_t win_idx, const char *str, Valign valign) {
   if (win_idx >= MAX_WINDOWS || str == NULL)
     return;
 
@@ -191,7 +198,8 @@ void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
 
   // --- 2. 分配阶段（带原位复用检测） ---
   int16_t old_h = win->canvas.handle;
-  CanvasHandle new_canvas = Pool_AllocCanvas(size.w, size.h, old_h, mode);
+  CanvasHandle new_canvas =
+      Pool_AllocCanvas(size.w, size.h, old_h, WINDOW_CANVAS_MODE);
 
   if (new_canvas.handle != -1) {
     // --- 3. 绘制阶段 ---
@@ -199,7 +207,7 @@ void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
     ctx.target = &new_canvas;
     ctx.cur_x = 0;
     ctx.cur_y = 0;
-    _Window_RenderText(&ctx, str, color, valign, size.h);
+    _Window_RenderText(&ctx, str, WINDOW_CANVAS_COLOR, valign, size.h);
 
     // --- 4. 原子切换 ---
     if (new_canvas.handle != old_h && old_h != -1) {
@@ -216,12 +224,9 @@ void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
 
 /**
  * @brief 将窗口的 Canvas 以单色块搬运方式写入 frame_buffer
- * @param win        目标窗口指针
- * @param h_px       歌词高亮分界像素 (0xFFFF=静态文本, 单色驱动中歌词颜色简化)
- * @param color_high 歌词亮色 (单色驱动中忽略)
- * @param color_base 歌词底色 (单色驱动中忽略)
- * @param off_x      额外 X 偏移
- * @param off_y      额外 Y 偏移
+ * @param win   目标窗口指针
+ * @param off_x 额外 X 偏移
+ * @param off_y 额外 Y 偏移
  *
  * 单色与硬件逻辑说明：
  *   - Canvas 格式：MSB-first (1 位/像素, 8 像素/字节)，bit 1 = 有有效像素
@@ -230,12 +235,7 @@ void Window_FillText(uint8_t win_idx, const char *str, CanvasColor color,
  * ~)
  *   - 超出 Canvas 范围的像素统一写 1 (0xFF，表示全灭)
  */
-void Window_BlitToScreen(LED_Window *win, uint16_t h_px, uint8_t color_high,
-                         uint8_t color_base, int16_t off_x, int16_t off_y) {
-  (void)h_px;
-  (void)color_high;
-  (void)color_base;
-
+void Window_BlitToScreen(LED_Window *win, int16_t off_x, int16_t off_y) {
   if (!win->is_active || win->canvas.handle == -1)
     return;
 
@@ -360,7 +360,7 @@ void WindowManager_Single_Process(uint8_t i) {
     }
   }
   // --- 2. 执行渲染搬运 (单色块搬运) ---
-  Window_BlitToScreen(win, 0xFFFF, 0, 0, 0, 0);
+  Window_BlitToScreen(win, 0, 0);
 }
 
 /**

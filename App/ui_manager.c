@@ -56,7 +56,7 @@ static void _FlushTextToWindow(void) {
   Font_Select_ASC(FONT_ASC_1608);
   Font_Select_GBK(FONT_GBK_1616S);
 
-  Window_FillText(0, s_shared_text, COLOR_ON, CANVAS_R, VALIGN_MIDDLE);
+  Window_FillText(0, s_shared_text, VALIGN_MIDDLE);
 
   // 超出宽度则开启滚动
   LED_Window *win = &window_list[0];
@@ -283,9 +283,9 @@ void UI_Manager_ShowTextSync(const char *text) {
   _FlushTextToWindow();
 
   // 同步渲染到显存并提交
-  Window_BlitToScreen(&window_list[0], 0xFFFF, 0, 0, 0, 0);
+  Window_BlitToScreen(&window_list[0], 0, 0);
   LED_Commit();
-  Window_BlitToScreen(&window_list[0], 0xFFFF, 0, 0, 0, 0);
+  Window_BlitToScreen(&window_list[0], 0, 0);
   LED_Commit();
 }
 

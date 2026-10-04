@@ -33,6 +33,9 @@ void Canvas_WritePixel(CanvasHandle *h, uint16_t x, uint16_t y,
                        CanvasColor color);
 CanvasColor Canvas_GetPixel(CanvasHandle *h, uint16_t x, uint16_t y);
 void Canvas_ClearCanvas(CanvasHandle *h); // 清空整个画布
+/** 整个画布按位取反（反白/反色）。单色平台只作用于当前有效平面
+ *  (r_ptr ?: g_ptr)；行尾 padding 位会被清回 0（详见 .c 内说明）。 */
+void Canvas_InvertCanvas(CanvasHandle *h);
 
 /* --- 排版与绘制 --- */
 // 第一遍：模拟测量，更新 limit
